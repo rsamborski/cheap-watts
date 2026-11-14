@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     solar_kwp: float | None = Field(default=None, gt=0)
     solar_tilt_degrees: float = Field(default=35.0, ge=0.0, le=90.0)
     solar_azimuth_degrees: float = Field(default=0.0, ge=-180.0, le=180.0)
+    solar_kwp_2: float | None = Field(default=None, gt=0)
+    solar_tilt_degrees_2: float | None = Field(default=None, ge=0.0, le=90.0)
+    solar_azimuth_degrees_2: float | None = Field(default=None, ge=-180.0, le=180.0)
     solar_system_efficiency: float = Field(default=0.85, gt=0.0, le=1.0)
     solar_sufficient_kwh_threshold: float = Field(default=12.0, ge=0.0)
 
@@ -105,6 +108,9 @@ class Settings(BaseSettings):
         "solar_latitude",
         "solar_longitude",
         "solar_kwp",
+        "solar_kwp_2",
+        "solar_tilt_degrees_2",
+        "solar_azimuth_degrees_2",
         "smtp_host",
         "smtp_username",
         "smtp_password",

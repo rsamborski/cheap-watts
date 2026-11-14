@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from src.clients.errors import ApiClientError, PayloadParseError
-from src.clients.solar import SolarForecastClient
+from src.clients.solar import SolarArray, SolarForecastClient
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -166,3 +166,58 @@ def test_solar_forecast_additional_malformed_payloads() -> None:
             pytest.raises(PayloadParseError),
         ):
             client.fetch_forecast(forecast_days=1)
+
+
+def test_solar_forecast_dual_string_east_west_sums_arrays() -> None:
+    with pytest.raises(ValueError, match="tilt_degrees"):
+        SolarArray(kwp=4.5, tilt_degrees=95.0)
+    with pytest.raises(ValueError, match="azimuth_degrees"):
+        SolarArray(kwp=4.5, azimuth_degrees=181.0)
+
+    requested_azimuths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        azimuth = request.url.params["azimuth"]
+        requested_azimuths.append(azimuth)
+        if azimuth == "-90.0":
+            # East string peaks in the morning
+            gti = [600.0, 200.0]
+        elif azimuth == "90.0":
+            # West string peaks in the afternoon
+            gti = [100.0, 700.0]
+        else:
+            raise AssertionError(f"Unexpected azimuth: {azimuth}")
+        return httpx.Response(
+            200,
+            json={
+                "timezone": "UTC",
+                "hourly": {
+                    "time": ["2026-06-15T08:00", "2026-06-15T14:00"],
+                    "global_tilted_irradiance": gti,
+                },
+            },
+        )
+
+    with SolarForecastClient(
+        latitude=52.23,
+        longitude=21.01,
+        kwp=4.0,
+        tilt_degrees=35.0,
+        azimuth_degrees=-90.0,
+        system_efficiency=0.85,
+        extra_arrays=[SolarArray(kwp=6.0, tilt_degrees=35.0, azimuth_degrees=90.0)],
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        forecast = client.fetch_forecast(forecast_days=1)
+
+    assert requested_azimuths == ["-90.0", "90.0"]
+    assert len(forecast.hours) == 2
+
+    # Hour 0 (08:00 UTC): East = 0.6 * 4 * 0.85 = 2.04, West = 0.1 * 6 * 0.85 = 0.51 -> 2.55 kWh
+    assert forecast.hours[0].estimated_kwh == pytest.approx(2.55)
+    # Weighted irradiance: (4*600 + 6*100) / 10 = 300.0 W/m2
+    assert forecast.hours[0].irradiance_wm2 == pytest.approx(300.0)
+
+    # Hour 1 (14:00 UTC): East = 0.2 * 4 * 0.85 = 0.68, West = 0.7 * 6 * 0.85 = 3.57 -> 4.25 kWh
+    assert forecast.hours[1].estimated_kwh == pytest.approx(4.25)
+    assert forecast.total_kwh == pytest.approx(6.8)

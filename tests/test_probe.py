@@ -1,0 +1,232 @@
+"""Offline unit tests for the read-only API probe runner and CLI subcommand."""
+
+from __future__ import annotations
+
+import logging
+from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import patch
+
+import httpx
+import pytest
+from pydantic import SecretStr
+
+from src.config import Settings
+from src.main import main
+from src.probe import _mask_identifier, format_probe_report, run_probes
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_mask_identifier_variants() -> None:
+    assert _mask_identifier(None) == "n/a"
+    assert _mask_identifier("") == "n/a"
+    assert _mask_identifier("ABCD") == "****"
+    assert _mask_identifier("DEYE0000EXAMPLE1") == "***PLE1"
+
+
+def test_run_probes_skips_all_when_unconfigured() -> None:
+    settings = Settings(_env_file=None)
+    results = run_probes(settings, target="all")
+
+    assert [r.service for r in results] == ["pstryk", "solar", "deye", "cardata"]
+    assert all(r.status == "skipped" for r in results)
+
+    report = format_probe_report(results, timezone="Europe/Warsaw")
+    assert "Summary: 0 ok, 4 skipped, 0 failed" in report
+    assert "[SKIP] pstryk" in report
+    assert "[SKIP] solar" in report
+    assert "[SKIP] deye" in report
+    assert "[SKIP] cardata" in report
+
+
+def test_run_probes_all_services_succeed_with_fixtures() -> None:
+    pstryk_bytes = (FIXTURES / "pstryk_unified_metrics.json").read_bytes()
+    solar_bytes = (FIXTURES / "open_meteo_forecast.json").read_bytes()
+    latest_bytes = (FIXTURES / "deye_device_latest.json").read_bytes()
+    tou_bytes = (FIXTURES / "deye_config_tou.json").read_bytes()
+    bmw_bytes = (FIXTURES / "cardata_bmw_telematic.json").read_bytes()
+
+    def deye_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1.0/device/latest":
+            return httpx.Response(200, content=latest_bytes)
+        if request.url.path == "/v1.0/config/tou":
+            return httpx.Response(200, content=tou_bytes)
+        raise AssertionError(f"Unexpected Deye path: {request.url.path}")
+
+    def cardata_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/customers/vehicles/WBA0000000EXAMPLE1/telematicData":
+            return httpx.Response(200, content=bmw_bytes)
+        raise AssertionError(f"Unexpected CarData path: {request.url.path}")
+
+    settings = Settings(
+        _env_file=None,
+        pstryk_api_key=SecretStr("test-api-key"),
+        solar_latitude=52.23,
+        solar_longitude=21.01,
+        solar_kwp=10.0,
+        deye_device_sn="DEYE0000EXAMPLE1",
+        deye_access_token=SecretStr("test-api-key"),
+        bmw_vin="WBA0000000EXAMPLE1",
+        bmw_cardata_access_token=SecretStr("test-api-key"),
+    )
+
+    transports = {
+        "pstryk": httpx.MockTransport(lambda _r: httpx.Response(200, content=pstryk_bytes)),
+        "solar": httpx.MockTransport(lambda _r: httpx.Response(200, content=solar_bytes)),
+        "deye": httpx.MockTransport(deye_handler),
+        "cardata": httpx.MockTransport(cardata_handler),
+    }
+
+    ref_time = datetime(2026, 11, 15, 15, 30, tzinfo=UTC)
+    results = run_probes(
+        settings,
+        target="all",
+        transports=transports,
+        reference_time=ref_time,
+    )
+
+    assert all(r.status == "ok" for r in results)
+    report = format_probe_report(results, timezone=settings.timezone)
+    assert "Summary: 4 ok, 0 skipped, 0 failed" in report
+    assert "Fetched 5 hourly price slots" in report
+    assert "Battery SoC 46%" in report
+    assert "TOU #1: 00:00-04:00" in report
+    assert "BMW (***PLE1)" in report
+    assert "MINI: skipped (not configured)" in report
+    assert "test-api-key" not in report
+
+
+def test_run_probes_handles_failures_and_partial_data() -> None:
+    today_only_bytes = (FIXTURES / "pstryk_today_only.json").read_bytes()
+    mini_bytes = (FIXTURES / "cardata_mini_telematic.json").read_bytes()
+
+    def cardata_mixed_handler(request: httpx.Request) -> httpx.Response:
+        if "WBA0000000EXAMPLE1" in request.url.path:
+            return httpx.Response(401, json={"error": "invalid_token"})
+        if "WMW0000000EXAMPLE2" in request.url.path:
+            return httpx.Response(200, content=mini_bytes)
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    settings = Settings(
+        _env_file=None,
+        pstryk_api_key=SecretStr("test-api-key"),
+        solar_latitude=52.23,
+        solar_longitude=21.01,
+        solar_kwp=10.0,
+        deye_device_sn="DEYE0000EXAMPLE1",
+        deye_access_token=SecretStr("test-api-key"),
+        bmw_vin="WBA0000000EXAMPLE1",
+        bmw_cardata_access_token=SecretStr("test-api-key"),
+        mini_vin="WMW0000000EXAMPLE2",
+        mini_cardata_access_token=SecretStr("test-api-key"),
+    )
+
+    transports = {
+        "pstryk": httpx.MockTransport(lambda _r: httpx.Response(200, content=today_only_bytes)),
+        "solar": httpx.MockTransport(lambda _r: httpx.Response(503, text="unavailable")),
+        "deye": httpx.MockTransport(lambda _r: httpx.Response(401, json={"msg": "bad token"})),
+        "cardata": httpx.MockTransport(cardata_mixed_handler),
+    }
+
+    # Pick a reference date that leaves Today with 0 slots and Tomorrow not published
+    ref_time = datetime(2026, 11, 10, 10, 0, tzinfo=UTC)
+    results = run_probes(
+        settings,
+        target="all",
+        transports=transports,
+        reference_time=ref_time,
+    )
+
+    by_svc = {r.service: r for r in results}
+    assert by_svc["pstryk"].status == "ok"
+    assert any("0 slots returned" in d for d in by_svc["pstryk"].details)
+    assert any("not yet published" in d for d in by_svc["pstryk"].details)
+    assert by_svc["solar"].status == "failed"
+    assert by_svc["deye"].status == "failed"
+    assert by_svc["cardata"].status == "failed"
+    assert any("BMW: FAILED" in d for d in by_svc["cardata"].details)
+    assert any("MINI (***PLE2)" in d for d in by_svc["cardata"].details)
+
+
+def test_cli_probe_command_dispatches_and_sets_exit_code(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log_dir = tmp_path / "logs"
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"LOG_DIR={log_dir.as_posix()}\n", encoding="utf-8")
+
+    # Unconfigured single-service probe -> skipped -> exit code 0
+    exit_ok = main(["--env-file", str(env_file), "probe", "--service", "solar"])
+    for handler in list(logging.getLogger("pstryk_pilot").handlers):
+        handler.close()
+    logging.getLogger("pstryk_pilot").handlers.clear()
+
+    captured = capsys.readouterr()
+    assert exit_ok == 0
+    assert "[SKIP] solar" in captured.out
+    assert "Summary: 0 ok, 1 skipped, 0 failed" in captured.out
+
+    # Simulate a failing probe -> exit code 1
+    env_file.write_text(
+        f"LOG_DIR={log_dir.as_posix()}\nPSTRYK_API_KEY=test-api-key\n",
+        encoding="utf-8",
+    )
+    failing_transport = {
+        "pstryk": httpx.MockTransport(lambda _r: httpx.Response(401, json={"detail": "denied"}))
+    }
+    with patch(
+        "src.main.run_probes", wraps=lambda s, target: run_probes(s, target, failing_transport)
+    ):
+        exit_fail = main(["--env-file", str(env_file), "probe", "-s", "pstryk"])
+
+    for handler in list(logging.getLogger("pstryk_pilot").handlers):
+        handler.close()
+    logging.getLogger("pstryk_pilot").handlers.clear()
+
+    captured_fail = capsys.readouterr()
+    assert exit_fail == 1
+    assert "[FAIL] pstryk" in captured_fail.out
+    assert "Summary: 0 ok, 0 skipped, 1 failed" in captured_fail.out
+
+
+def test_probe_solar_dual_string_uses_fallback_tilt_and_reports_total_kwp() -> None:
+    captured_params: list[tuple[str, str]] = []
+
+    def solar_handler(request: httpx.Request) -> httpx.Response:
+        captured_params.append((request.url.params["tilt"], request.url.params["azimuth"]))
+        return httpx.Response(
+            200,
+            json={
+                "timezone": "UTC",
+                "hourly": {
+                    "time": ["2026-11-15T10:00"],
+                    "global_tilted_irradiance": [400.0],
+                },
+            },
+        )
+
+    settings = Settings(
+        _env_file=None,
+        solar_latitude=52.23,
+        solar_longitude=21.01,
+        solar_kwp=4.5,
+        solar_tilt_degrees=30.0,
+        solar_azimuth_degrees=-90.0,
+        solar_kwp_2=4.5,
+        solar_azimuth_degrees_2=90.0,
+        solar_system_efficiency=0.85,
+    )
+
+    results = run_probes(
+        settings,
+        target="solar",
+        transports={"solar": httpx.MockTransport(solar_handler)},
+        reference_time=datetime(2026, 11, 15, 10, 0, tzinfo=UTC),
+    )
+
+    assert len(results) == 1
+    assert results[0].status == "ok"
+    assert "9.0 kWp (2 strings)" in results[0].headline
+    assert captured_params == [("30.0", "-90.0"), ("30.0", "90.0")]

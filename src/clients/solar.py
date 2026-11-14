@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
 from types import TracebackType
 from typing import Any
@@ -42,6 +44,23 @@ def _parse_open_meteo_time(raw: Any, response_tz: tzinfo, target_tz: ZoneInfo) -
     return dt.astimezone(target_tz)
 
 
+@dataclass(frozen=True)
+class SolarArray:
+    """Single PV string/plane orientation and rated capacity."""
+
+    kwp: float
+    tilt_degrees: float = 35.0
+    azimuth_degrees: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.kwp <= 0.0:
+            raise ValueError("kwp must be strictly positive")
+        if not 0.0 <= self.tilt_degrees <= 90.0:
+            raise ValueError("tilt_degrees must be between 0 and 90")
+        if not -180.0 <= self.azimuth_degrees <= 180.0:
+            raise ValueError("azimuth_degrees must be between -180 and 180")
+
+
 class SolarForecastClient:
     """Fetches hourly solar irradiance from Open-Meteo and estimates PV kWh output."""
 
@@ -57,21 +76,24 @@ class SolarForecastClient:
         tz_name: str = "Europe/Warsaw",
         timeout: float = 15.0,
         transport: httpx.BaseTransport | None = None,
+        extra_arrays: Sequence[SolarArray] = (),
     ) -> None:
         if not -90.0 <= latitude <= 90.0:
             raise ValueError("latitude must be between -90 and 90")
         if not -180.0 <= longitude <= 180.0:
             raise ValueError("longitude must be between -180 and 180")
-        if kwp <= 0.0:
-            raise ValueError("kwp must be strictly positive")
         if not 0.0 < system_efficiency <= 1.0:
             raise ValueError("system_efficiency must be in (0, 1]")
 
+        primary_array = SolarArray(
+            kwp=kwp,
+            tilt_degrees=tilt_degrees,
+            azimuth_degrees=azimuth_degrees,
+        )
         self._latitude = latitude
         self._longitude = longitude
-        self._kwp = kwp
-        self._tilt = tilt_degrees
-        self._azimuth = azimuth_degrees
+        self._arrays: tuple[SolarArray, ...] = (primary_array, *extra_arrays)
+        self._kwp = sum(arr.kwp for arr in self._arrays)
         self._efficiency = system_efficiency
         self._tz = ZoneInfo(tz_name)
         self._client = httpx.Client(
@@ -101,6 +123,30 @@ class SolarForecastClient:
         if not 1 <= forecast_days <= 7:
             raise ValueError("forecast_days must be between 1 and 7")
 
+        per_array_hours = [
+            (array, self._fetch_single_array(array, forecast_days)) for array in self._arrays
+        ]
+        if len(per_array_hours) == 1:
+            hours = per_array_hours[0][1]
+        else:
+            hours = self._merge_array_hours(per_array_hours)
+
+        hours.sort(key=lambda item: item.start)
+        forecast = SolarForecast(hours=hours, fetched_at=datetime.now(tz=UTC))
+        logger.info(
+            "Fetched Open-Meteo solar forecast",
+            extra={
+                "event": "solar_forecast_fetched",
+                "hour_count": len(hours),
+                "total_kwh": forecast.total_kwh,
+                "kwp": self._kwp,
+                "arrays": len(self._arrays),
+            },
+        )
+        return forecast
+
+    def _fetch_single_array(self, array: SolarArray, forecast_days: int) -> list[SolarHour]:
+        """Fetch and convert hourly irradiance for a single PV array plane."""
         try:
             response = self._client.get(
                 _FORECAST_PATH,
@@ -108,8 +154,8 @@ class SolarForecastClient:
                     "latitude": self._latitude,
                     "longitude": self._longitude,
                     "hourly": "shortwave_radiation,global_tilted_irradiance",
-                    "tilt": self._tilt,
-                    "azimuth": self._azimuth,
+                    "tilt": array.tilt_degrees,
+                    "azimuth": array.azimuth_degrees,
                     "timezone": "UTC",
                     "forecast_days": forecast_days,
                 },
@@ -153,8 +199,8 @@ class SolarForecastClient:
                 raw_irradiance = ghi_list[idx]
 
             irradiance = self._parse_irradiance(raw_irradiance)
-            raw_kwh = (irradiance / 1000.0) * self._kwp * self._efficiency
-            estimated_kwh = round(min(self._kwp, max(0.0, raw_kwh)), 4)
+            raw_kwh = (irradiance / 1000.0) * array.kwp * self._efficiency
+            estimated_kwh = round(min(array.kwp, max(0.0, raw_kwh)), 4)
 
             hours.append(
                 SolarHour(
@@ -164,19 +210,36 @@ class SolarForecastClient:
                     estimated_kwh=estimated_kwh,
                 )
             )
+        return hours
 
-        hours.sort(key=lambda item: item.start)
-        forecast = SolarForecast(hours=hours, fetched_at=datetime.now(tz=UTC))
-        logger.info(
-            "Fetched Open-Meteo solar forecast",
-            extra={
-                "event": "solar_forecast_fetched",
-                "hour_count": len(hours),
-                "total_kwh": forecast.total_kwh,
-                "kwp": self._kwp,
-            },
-        )
-        return forecast
+    @staticmethod
+    def _merge_array_hours(
+        per_array_hours: Sequence[tuple[SolarArray, list[SolarHour]]],
+    ) -> list[SolarHour]:
+        """Combine hourly forecasts across multiple PV array planes by timestamp."""
+        buckets: dict[datetime, list[tuple[SolarArray, SolarHour]]] = {}
+        for array, hours in per_array_hours:
+            for hour in hours:
+                buckets.setdefault(hour.start, []).append((array, hour))
+
+        merged: list[SolarHour] = []
+        for start_dt, entries in buckets.items():
+            total_kwp = sum(arr.kwp for arr, _ in entries)
+            weighted_irradiance = (
+                sum(arr.kwp * hr.irradiance_wm2 for arr, hr in entries) / total_kwp
+                if total_kwp > 0.0
+                else 0.0
+            )
+            total_kwh = sum(hr.estimated_kwh for _, hr in entries)
+            merged.append(
+                SolarHour(
+                    start=start_dt,
+                    end=entries[0][1].end,
+                    irradiance_wm2=round(weighted_irradiance, 2),
+                    estimated_kwh=round(total_kwh, 4),
+                )
+            )
+        return merged
 
     @staticmethod
     def _parse_irradiance(raw: Any) -> float:

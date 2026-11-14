@@ -33,13 +33,13 @@ def test_pstryk_fetch_today_and_tomorrow_parses_fixture() -> None:
 
     ref_time = datetime(2026, 11, 15, 15, 30, tzinfo=UTC)
     with PstrykClient(
-        api_key=SecretStr("test-api-key"),
+        api_key=SecretStr("Bearer test-api-key"),
         tz_name="Europe/Warsaw",
         transport=httpx.MockTransport(handler),
     ) as client:
         slots = client.fetch_today_and_tomorrow(reference_time=ref_time)
 
-    assert captured_headers["authorization"] == "Bearer test-api-key"
+    assert captured_headers["authorization"] == "test-api-key"
     assert captured_params["metrics"] == "pricing"
     assert captured_params["resolution"] == "hour"
 

@@ -13,6 +13,7 @@ from pathlib import Path
 from src import __version__
 from src.config import Settings, load_settings
 from src.logging_setup import setup_logging
+from src.probe import ProbeTarget, format_probe_report, run_probes
 from src.state import StateStore
 
 
@@ -50,6 +51,18 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "status",
         help="Print configuration readiness and last persisted state.",
+    )
+
+    probe_parser = subparsers.add_parser(
+        "probe",
+        help="Run read-only live checks against configured external APIs.",
+    )
+    probe_parser.add_argument(
+        "--service",
+        "-s",
+        choices=("all", "pstryk", "solar", "deye", "cardata"),
+        default="all",
+        help="Probe a single service or all services (default: all).",
     )
 
     return parser
@@ -138,6 +151,19 @@ def execute_status(settings: Settings) -> int:
     return 0
 
 
+def execute_probe(settings: Settings, target: ProbeTarget = "all") -> int:
+    """Execute read-only API connectivity and parsing probes."""
+    setup_logging(
+        settings.log_dir,
+        level=settings.log_level,
+        tz_name=settings.timezone,
+    )
+    results = run_probes(settings, target=target)
+    print(format_probe_report(results, timezone=settings.timezone))
+    has_failures = any(res.status == "failed" for res in results)
+    return 1 if has_failures else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse CLI arguments and dispatch the requested command."""
     parser = build_parser()
@@ -154,6 +180,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return execute_run(settings, force_dry_run=args.dry_run)
     if args.command == "status":
         return execute_status(settings)
+    if args.command == "probe":
+        return execute_probe(settings, target=args.service)
 
     parser.print_help()
     return 2

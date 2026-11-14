@@ -58,6 +58,14 @@ def _extract_frames(payload: dict[str, Any]) -> list[dict[str, Any]]:
     raise PayloadParseError("Pstryk response did not contain a 'frames' list")
 
 
+def _normalize_api_token(secret: SecretStr) -> str:
+    """Normalize Pstryk API key (raw `sk-...` token expected in `Authorization` header)."""
+    token = secret.get_secret_value().strip().strip('"').strip("'")
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token
+
+
 class PstrykClient:
     """HTTP client for Pstryk unified-metrics hourly tariff data."""
 
@@ -70,6 +78,7 @@ class PstrykClient:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self._api_key = api_key
+        self._auth_token = _normalize_api_token(api_key)
         self._tz = ZoneInfo(tz_name)
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
@@ -113,7 +122,7 @@ class PstrykClient:
                     "window_end": end_utc,
                 },
                 headers={
-                    "Authorization": f"Bearer {self._api_key.get_secret_value()}",
+                    "Authorization": self._auth_token,
                 },
             )
         except httpx.HTTPError as exc:
@@ -171,11 +180,17 @@ class PstrykClient:
         return any(slot.start.date() == tomorrow for slot in slots)
 
     def _parse_frame(self, frame: dict[str, Any]) -> PriceSlot | None:
-        raw_gross = frame.get("price_gross")
+        metrics_obj = frame.get("metrics")
+        pricing_obj = metrics_obj.get("pricing") if isinstance(metrics_obj, dict) else None
+        source: dict[str, Any] = pricing_obj if isinstance(pricing_obj, dict) else frame
+
+        raw_gross = source.get("price_gross")
         if raw_gross is None:
-            raw_gross = frame.get("price_prosumer_gross")
+            raw_gross = source.get("full_price")
         if raw_gross is None:
-            raw_gross = frame.get("price")
+            raw_gross = source.get("price_prosumer_gross")
+        if raw_gross is None:
+            raw_gross = source.get("price", frame.get("price"))
 
         # Future hours prior to ~14:00 CET Day-Ahead publication may carry null prices.
         if raw_gross is None:
@@ -186,7 +201,7 @@ class PstrykClient:
         except (TypeError, ValueError) as exc:
             raise PayloadParseError(f"Invalid Pstryk gross price value: {raw_gross!r}") from exc
 
-        raw_net = frame.get("price_net")
+        raw_net = source.get("price_net", frame.get("price_net"))
         net_val: float | None = None
         if raw_net is not None:
             try:
@@ -194,22 +209,22 @@ class PstrykClient:
             except (TypeError, ValueError) as exc:
                 raise PayloadParseError(f"Invalid Pstryk net price value: {raw_net!r}") from exc
 
-        unit = str(frame.get("unit", "PLN/kWh")).strip().upper()
+        unit = str(source.get("unit", frame.get("unit", "PLN/kWh"))).strip().upper()
         if unit == "PLN/MWH":
             gross_val = round(gross_val / 1000.0, 6)
             if net_val is not None:
                 net_val = round(net_val / 1000.0, 6)
 
-        raw_start = frame.get("window_start") or frame.get("timestamp") or frame.get("start")
-        start_dt = _parse_iso_datetime(raw_start, "window_start", self._tz)
+        raw_start = frame.get("start") or frame.get("window_start") or frame.get("timestamp")
+        start_dt = _parse_iso_datetime(raw_start, "start", self._tz)
 
-        raw_end = frame.get("window_end") or frame.get("end")
+        raw_end = frame.get("end") or frame.get("window_end")
         if raw_end is not None:
-            end_dt = _parse_iso_datetime(raw_end, "window_end", self._tz)
+            end_dt = _parse_iso_datetime(raw_end, "end", self._tz)
         else:
             end_dt = start_dt + timedelta(hours=1)
 
-        currency = str(frame.get("currency") or "PLN").strip().upper()
+        currency = str(source.get("currency") or frame.get("currency") or "PLN").strip().upper()
         return PriceSlot(
             start=start_dt,
             end=end_dt,

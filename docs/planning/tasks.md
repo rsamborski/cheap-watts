@@ -23,6 +23,7 @@ Track progress across implementation phases. Update checkboxes as tasks are comp
 - [x] Implement **BMW CarData client** (`src/clients/cardata.py`) for reading BMW & MINI SoC, plug connection, and active charging status.
 - [x] Implement **Solar forecast client** (`src/clients/solar.py`) via Open-Meteo / Forecast.Solar.
 - [x] Capture anonymized JSON test fixtures in `tests/fixtures/` and write unit tests for response parsing.
+- [x] Add read-only live API smoke-test CLI command (`pstryk-pilot probe`) with per-service selection and unit tests.
 
 ## Phase 3: Decision Engine & Schedule Planner
 - [ ] Implement EV evaluation logic: if an EV is actively charging, skip EV threshold evaluation and block active EV hours from Deye grid-charging; otherwise evaluate `BMW <= 20%` and `MINI <= 40%`.
