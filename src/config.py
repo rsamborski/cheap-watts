@@ -1,0 +1,120 @@
+"""Application configuration loaded from environment variables and .env."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Typed configuration for pstryk-pilot."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # --- Pstryk API ---
+    pstryk_api_key: SecretStr | None = None
+    pstryk_base_url: str = "https://api.pstryk.pl"
+
+    # --- Deye Inverter / Storage ---
+    deye_modbus_host: str | None = None
+    deye_modbus_port: int = 8899
+    deye_logger_serial: str | None = None
+    deye_app_id: str | None = None
+    deye_app_secret: SecretStr | None = None
+    deye_api_base_url: str = "https://eu1-developer.deyecloud.com"
+    deye_device_sn: str | None = None
+    deye_station_id: str | None = None
+
+    # --- Deye Home Battery Parameters ---
+    battery_capacity_kwh: float = Field(default=10.0, gt=0)
+    battery_target_soc: int = Field(default=95, ge=10, le=100)
+    battery_min_soc: int = Field(default=20, ge=5, le=90)
+    battery_max_charge_kw: float = Field(default=5.0, gt=0)
+
+    # --- BMW CarData (BMW & MINI) ---
+    bmw_cardata_client_id: str | None = None
+    mini_cardata_client_id: str | None = None
+    bmw_soc_threshold: int = Field(default=20, ge=5, le=95)
+    mini_soc_threshold: int = Field(default=40, ge=5, le=95)
+    ev_slow_charge_amps: int = Field(default=8, ge=6, le=16)
+
+    # --- Solar / PV Forecast ---
+    solar_latitude: float | None = Field(default=None, ge=-90.0, le=90.0)
+    solar_longitude: float | None = Field(default=None, ge=-180.0, le=180.0)
+    solar_kwp: float | None = Field(default=None, gt=0)
+    solar_sufficient_kwh_threshold: float = Field(default=12.0, ge=0.0)
+
+    # --- Email Notifications (SMTP) ---
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_use_tls: bool = True
+    smtp_from_email: str | None = None
+    smtp_to_email: str | None = None
+
+    # --- Runtime, Logging & State ---
+    dry_run: bool = False
+    timezone: str = "Europe/Warsaw"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    log_dir: Path = Path("logs")
+    state_file: Path = Path("data/state.json")
+    alert_cooldown_hours: float = Field(default=12.0, ge=0.0)
+
+    @field_validator(
+        "pstryk_api_key",
+        "deye_modbus_host",
+        "deye_logger_serial",
+        "deye_app_id",
+        "deye_app_secret",
+        "deye_device_sn",
+        "deye_station_id",
+        "bmw_cardata_client_id",
+        "mini_cardata_client_id",
+        "solar_latitude",
+        "solar_longitude",
+        "solar_kwp",
+        "smtp_host",
+        "smtp_username",
+        "smtp_password",
+        "smtp_from_email",
+        "smtp_to_email",
+        mode="before",
+    )
+    @classmethod
+    def _empty_string_to_none(cls, value: Any) -> Any:
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value
+
+    def missing_live_settings(self) -> list[str]:
+        """Return names of required settings that are not yet configured for live execution."""
+        required_checks: list[tuple[str, Any]] = [
+            ("PSTRYK_API_KEY", self.pstryk_api_key),
+            ("DEYE_APP_ID", self.deye_app_id),
+            ("DEYE_APP_SECRET", self.deye_app_secret),
+            ("DEYE_DEVICE_SN", self.deye_device_sn),
+            ("BMW_CARDATA_CLIENT_ID", self.bmw_cardata_client_id),
+            ("MINI_CARDATA_CLIENT_ID", self.mini_cardata_client_id),
+            ("SOLAR_LATITUDE", self.solar_latitude),
+            ("SOLAR_LONGITUDE", self.solar_longitude),
+            ("SOLAR_KWP", self.solar_kwp),
+            ("SMTP_HOST", self.smtp_host),
+            ("SMTP_FROM_EMAIL", self.smtp_from_email),
+            ("SMTP_TO_EMAIL", self.smtp_to_email),
+        ]
+        return [env_name for env_name, val in required_checks if val is None]
+
+
+def load_settings(env_file: str | Path | None = ".env") -> Settings:
+    """Load application settings, optionally overriding the .env file path."""
+    if env_file is None:
+        return Settings(_env_file=None)
+    return Settings(_env_file=env_file)

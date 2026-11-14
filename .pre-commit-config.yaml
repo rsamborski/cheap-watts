@@ -3,3 +3,30 @@ repos:
     rev: v8.30.1
     hooks:
       - id: gitleaks
+        language_version: 1.24.11
+
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: Ruff Linter
+        entry: bash -c 'export PATH="$HOME/.local/bin:$PATH"; uv run ruff check src tests'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      - id: black-check
+        name: Black Formatter Check
+        entry: bash -c 'export PATH="$HOME/.local/bin:$PATH"; uv run black --check src tests'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      - id: pytest-cov
+        name: Pytest & Coverage (>90%)
+        entry: bash -c 'export PATH="$HOME/.local/bin:$PATH"; uv run pytest --cov=src --cov-report=term-missing'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]

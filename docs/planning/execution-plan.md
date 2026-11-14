@@ -16,7 +16,7 @@ An automated, headless Home Energy Management System (HEMS) written in Python (`
 | **Summer / Sun Optimization** | Automatic via **Open-Meteo / Forecast.Solar** (lat/lon + kWp) + real-time Deye PV telemetry. Strong PV turns **OFF** Deye grid-charging (solar charges battery automatically) and recommends daytime **slow-charge (6–10A)** EV windows for self-consumption. |
 | **Notifications** | Standard **SMTP** sent **whenever actionable changes occur** — i.e., any Deye TOU schedule change (including blocking grid-charge hours when an EV starts charging or turning grid-charge OFF for sunny weather) or a new EV charge recommendation — plus critical errors. No email if no changes occur. |
 | **Dry-Run Mode** | `--dry-run` (or `DRY_RUN=true`): runs all read APIs and decision logic, logs planned Deye mutations, **skips all Deye write calls**, and **sends change/alert emails prefixed with `[DRY-RUN]`** (no email if no changes are expected). |
-| **Logging & Audit** | Structured rotating logs (file + stdout) recording every API snapshot, decision rationale, Deye diff, and notification event. |
+| **Logging & Audit** | Standard Linux-style plain-text rotating `.log` files (`logs/pstryk-pilot.log` + `stdout`) recording every API snapshot, decision rationale, Deye diff, and notification event. |
 
 ---
 
@@ -28,29 +28,29 @@ pstryk-pilot/
 ├── uv.lock
 ├── .env.example
 ├── README.md
+├── AGENTS.md
 ├── docs/
 │   └── planning/
 │       ├── execution-plan.md
 │       ├── adr-001-initial-architecture.md
 │       └── tasks.md
 ├── src/
-│   └── pstryk_pilot/
-│       ├── __init__.py
-│       ├── main.py            # CLI entrypoint (`pstryk-pilot run --dry-run`)
-│       ├── config.py          # Pydantic settings (thresholds, battery kWh, SMTP, lat/lon, kWp)
-│       ├── logging_setup.py   # Rotating file + structured console logging
-│       ├── state.py           # JSON/SQLite state store (alert cooldowns, last Deye schedule)
-│       ├── models.py          # Domain models (PriceSlot, VehicleState, InverterState, Plan)
-│       ├── clients/
-│       │   ├── pstryk.py      # Pstryk API client (today & next-day hourly prices)
-│       │   ├── deye.py        # Deye Cloud / Solarman Open API client (read SoC/PV, write TOU)
-│       │   ├── cardata.py     # BMW CarData client (BMW & MINI SoC + charging status)
-│       │   └── solar.py       # Open-Meteo / Forecast.Solar PV forecast client
-│       ├── engine/
-│       │   ├── planner.py     # Decision engine (EV priority, PV offset, non-overlapping Deye slots)
-│       │   └── diff.py        # Computes exact Deye TOU changes & avoids redundant API writes
-│       └── notify/
-│           └── email.py       # SMTP sender + `[DRY-RUN]` prefixing + message templates
+│   ├── __init__.py
+│   ├── main.py                # CLI entrypoint (`pstryk-pilot run --dry-run`)
+│   ├── config.py              # Pydantic settings (thresholds, battery kWh, SMTP, lat/lon, kWp)
+│   ├── logging_setup.py       # Linux-style rotating .log file + console logging
+│   ├── state.py               # JSON/SQLite state store (alert cooldowns, last Deye schedule)
+│   ├── models.py              # Domain models (PriceSlot, VehicleState, InverterState, Plan)
+│   ├── clients/
+│   │   ├── pstryk.py          # Pstryk API client (today & next-day hourly prices)
+│   │   ├── deye.py            # Deye Cloud / Solarman Open API client (read SoC/PV, write TOU)
+│   │   ├── cardata.py         # BMW CarData client (BMW & MINI SoC + charging status)
+│   │   └── solar.py           # Open-Meteo / Forecast.Solar PV forecast client
+│   ├── engine/
+│   │   ├── planner.py         # Decision engine (EV priority, PV offset, non-overlapping Deye slots)
+│   │   └── diff.py            # Computes exact Deye TOU changes & avoids redundant API writes
+│   └── notify/
+│       └── email.py           # SMTP sender + `[DRY-RUN]` prefixing + message templates
 └── tests/
     ├── test_planner.py        # Unit tests for summer PV, EV conflict, dynamic SoC sizing
     ├── test_diff.py

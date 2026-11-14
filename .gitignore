@@ -267,3 +267,8 @@ aws-credentials.json
 .DS_Store
 Thumbs.db
 
+# pstryk-pilot runtime logs & local state
+logs/
+data/
+
+
