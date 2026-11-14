@@ -1,0 +1,10 @@
+{
+  "code": "1000000",
+  "msg": "success",
+  "success": true,
+  "data": {
+    "accessToken": "test-api-key",
+    "tokenType": "bearer",
+    "expiresIn": 5183999
+  }
+}

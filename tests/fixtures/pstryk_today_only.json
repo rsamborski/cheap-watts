@@ -1,0 +1,20 @@
+{
+  "frames": [
+    {
+      "window_start": "2026-11-14T11:00:00Z",
+      "window_end": "2026-11-14T12:00:00Z",
+      "price_net": 0.42,
+      "price_gross": 0.5166,
+      "unit": "PLN/kWh",
+      "currency": "PLN"
+    },
+    {
+      "window_start": "2026-11-14T23:00:00Z",
+      "window_end": "2026-11-15T00:00:00Z",
+      "price_net": null,
+      "price_gross": null,
+      "unit": "PLN/kWh",
+      "currency": "PLN"
+    }
+  ]
+}

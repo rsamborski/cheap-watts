@@ -1,0 +1,23 @@
+{
+  "vin": "WBA0000000EXAMPLE1",
+  "telematicData": {
+    "vehicle.powertrain.electric.battery.stateOfCharge.displayed": {
+      "timestamp": "2026-11-14T21:45:00Z",
+      "unit": "%",
+      "value": 18
+    },
+    "vehicle.powertrain.electric.battery.stateOfCharge.target": {
+      "timestamp": "2026-11-14T21:45:00Z",
+      "unit": "%",
+      "value": 100
+    },
+    "vehicle.drivetrain.electricEngine.charging.status": {
+      "timestamp": "2026-11-14T21:45:00Z",
+      "value": "NOCHARGING"
+    },
+    "vehicle.body.chargingPort.status": {
+      "timestamp": "2026-11-14T21:45:00Z",
+      "value": "CONNECTED"
+    }
+  }
+}

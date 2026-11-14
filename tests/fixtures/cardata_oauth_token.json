@@ -1,0 +1,6 @@
+{
+  "access_token": "test-api-key",
+  "token_type": "Bearer",
+  "expires_in": 3599,
+  "scope": "cardata:api:read"
+}

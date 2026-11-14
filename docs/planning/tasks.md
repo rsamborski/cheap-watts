@@ -17,12 +17,12 @@ Track progress across implementation phases. Update checkboxes as tasks are comp
 - [x] Create CLI entrypoint (`src/main.py`) supporting `run` and `--dry-run`.
 
 ## Phase 2: Read-Only API Connectors & Test Fixtures
-- [ ] Define shared domain models (`src/models.py`: `PriceSlot`, `SolarHour`, `VehicleStatus`, `InverterStatus`, `ChargingPlan`).
-- [ ] Implement **Pstryk API client** (`src/clients/pstryk.py`) for fetching today & next-day hourly tariffs.
-- [ ] Implement **Deye Cloud / Solarman Open API read client** (`src/clients/deye.py`) behind an `InverterClient` protocol (battery SoC, PV power, current TOU slots).
-- [ ] Implement **BMW CarData client** (`src/clients/cardata.py`) for reading BMW & MINI SoC, plug connection, and active charging status.
-- [ ] Implement **Solar forecast client** (`src/clients/solar.py`) via Open-Meteo / Forecast.Solar.
-- [ ] Capture anonymized JSON test fixtures in `tests/fixtures/` and write unit tests for response parsing.
+- [x] Define shared domain models (`src/models.py`: `PriceSlot`, `SolarHour`, `VehicleStatus`, `InverterStatus`, `ChargingPlan`).
+- [x] Implement **Pstryk API client** (`src/clients/pstryk.py`) for fetching today & next-day hourly tariffs.
+- [x] Implement **Deye Cloud / Solarman Open API read client** (`src/clients/deye.py`) behind an `InverterClient` protocol (battery SoC, PV power, current TOU slots).
+- [x] Implement **BMW CarData client** (`src/clients/cardata.py`) for reading BMW & MINI SoC, plug connection, and active charging status.
+- [x] Implement **Solar forecast client** (`src/clients/solar.py`) via Open-Meteo / Forecast.Solar.
+- [x] Capture anonymized JSON test fixtures in `tests/fixtures/` and write unit tests for response parsing.
 
 ## Phase 3: Decision Engine & Schedule Planner
 - [ ] Implement EV evaluation logic: if an EV is actively charging, skip EV threshold evaluation and block active EV hours from Deye grid-charging; otherwise evaluate `BMW <= 20%` and `MINI <= 40%`.

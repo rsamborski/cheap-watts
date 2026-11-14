@@ -1,0 +1,50 @@
+{
+  "resolution": "hour",
+  "currency": "PLN",
+  "metrics": {
+    "pricing": {
+      "frames": [
+        {
+          "window_start": "2026-11-14T23:00:00Z",
+          "window_end": "2026-11-15T00:00:00Z",
+          "price_net": 0.28,
+          "price_gross": 0.3444,
+          "unit": "PLN/kWh",
+          "currency": "PLN"
+        },
+        {
+          "window_start": "2026-11-15T00:00:00Z",
+          "window_end": "2026-11-15T01:00:00Z",
+          "price_net": 0.21,
+          "price_gross": 0.2583,
+          "unit": "PLN/kWh",
+          "currency": "PLN"
+        },
+        {
+          "window_start": "2026-11-15T11:00:00Z",
+          "window_end": "2026-11-15T12:00:00Z",
+          "price_net": -0.065,
+          "price_gross": -0.08,
+          "unit": "PLN/kWh",
+          "currency": "PLN"
+        },
+        {
+          "window_start": "2026-11-15T17:00:00Z",
+          "window_end": "2026-11-15T18:00:00Z",
+          "price_net": 1.1545,
+          "price_gross": 1.42,
+          "unit": "PLN/kWh",
+          "currency": "PLN"
+        },
+        {
+          "window_start": "2026-11-15T23:00:00Z",
+          "window_end": "2026-11-16T00:00:00Z",
+          "price_net": 0.19,
+          "price_gross": 0.2337,
+          "unit": "PLN/kWh",
+          "currency": "PLN"
+        }
+      ]
+    }
+  }
+}

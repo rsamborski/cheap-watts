@@ -1,0 +1,65 @@
+{
+  "code": "0",
+  "msg": "success",
+  "success": true,
+  "data": {
+    "deviceSn": "DEYE0000EXAMPLE1",
+    "touAction": 1,
+    "timeUseSettingItems": [
+      {
+        "time": "00:00-04:00",
+        "voltageOrSoc": 1,
+        "val": 95,
+        "gridCharge": true,
+        "genCharge": false,
+        "peakShaving": false,
+        "sell": false
+      },
+      {
+        "time": "04:00-08:00",
+        "voltageOrSoc": 1,
+        "val": 25,
+        "gridCharge": false,
+        "genCharge": false,
+        "peakShaving": false,
+        "sell": false
+      },
+      {
+        "time": "08:00-12:00",
+        "voltageOrSoc": 1,
+        "val": 20,
+        "gridCharge": false,
+        "genCharge": false,
+        "peakShaving": false,
+        "sell": false
+      },
+      {
+        "time": "12:00-16:00",
+        "voltageOrSoc": 1,
+        "val": 20,
+        "gridCharge": false,
+        "genCharge": false,
+        "peakShaving": false,
+        "sell": false
+      },
+      {
+        "time": "16:00-20:00",
+        "voltageOrSoc": 1,
+        "val": 20,
+        "gridCharge": false,
+        "genCharge": false,
+        "peakShaving": false,
+        "sell": false
+      },
+      {
+        "time": "20:00-24:00",
+        "voltageOrSoc": 1,
+        "val": 20,
+        "gridCharge": false,
+        "genCharge": false,
+        "peakShaving": false,
+        "sell": false
+      }
+    ]
+  }
+}

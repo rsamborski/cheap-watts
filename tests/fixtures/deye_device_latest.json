@@ -1,0 +1,45 @@
+{
+  "code": "1000000",
+  "msg": "success",
+  "success": true,
+  "deviceDataList": [
+    {
+      "deviceSn": "DEYE0000EXAMPLE1",
+      "deviceType": "INVERTER",
+      "deviceState": 1,
+      "collectionTime": 1794697200,
+      "dataList": [
+        {
+          "key": "SOC",
+          "value": "46",
+          "unit": "%",
+          "name": "SOC"
+        },
+        {
+          "key": "totalDCInputPower",
+          "value": "2840.5",
+          "unit": "W",
+          "name": "Total DC Input Power"
+        },
+        {
+          "key": "batteryPower",
+          "value": "-1250.0",
+          "unit": "W",
+          "name": "Battery Power"
+        },
+        {
+          "key": "totalGridPower",
+          "value": "85.0",
+          "unit": "W",
+          "name": "Total Grid Power"
+        },
+        {
+          "key": "totalLoadPower",
+          "value": "1675.5",
+          "unit": "W",
+          "name": "Total Load Power"
+        }
+      ]
+    }
+  ]
+}

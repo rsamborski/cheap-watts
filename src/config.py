@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     deye_logger_serial: str | None = None
     deye_app_id: str | None = None
     deye_app_secret: SecretStr | None = None
+    deye_email: str | None = None
+    deye_password: SecretStr | None = None
+    deye_access_token: SecretStr | None = None
     deye_api_base_url: str = "https://eu1-developer.deyecloud.com"
     deye_device_sn: str | None = None
     deye_station_id: str | None = None
@@ -39,16 +42,28 @@ class Settings(BaseSettings):
     battery_max_charge_kw: float = Field(default=5.0, gt=0)
 
     # --- BMW CarData (BMW & MINI) ---
+    cardata_base_url: str = "https://api-cardata.bmwgroup.com"
+    cardata_token_url: str = "https://customer.bmwgroup.com/gcdm/oauth/token"
     bmw_cardata_client_id: str | None = None
+    bmw_vin: str | None = None
+    bmw_cardata_access_token: SecretStr | None = None
+    bmw_cardata_refresh_token: SecretStr | None = None
     mini_cardata_client_id: str | None = None
+    mini_vin: str | None = None
+    mini_cardata_access_token: SecretStr | None = None
+    mini_cardata_refresh_token: SecretStr | None = None
     bmw_soc_threshold: int = Field(default=20, ge=5, le=95)
     mini_soc_threshold: int = Field(default=40, ge=5, le=95)
     ev_slow_charge_amps: int = Field(default=8, ge=6, le=16)
 
     # --- Solar / PV Forecast ---
+    solar_base_url: str = "https://api.open-meteo.com"
     solar_latitude: float | None = Field(default=None, ge=-90.0, le=90.0)
     solar_longitude: float | None = Field(default=None, ge=-180.0, le=180.0)
     solar_kwp: float | None = Field(default=None, gt=0)
+    solar_tilt_degrees: float = Field(default=35.0, ge=0.0, le=90.0)
+    solar_azimuth_degrees: float = Field(default=0.0, ge=-180.0, le=180.0)
+    solar_system_efficiency: float = Field(default=0.85, gt=0.0, le=1.0)
     solar_sufficient_kwh_threshold: float = Field(default=12.0, ge=0.0)
 
     # --- Email Notifications (SMTP) ---
@@ -74,10 +89,19 @@ class Settings(BaseSettings):
         "deye_logger_serial",
         "deye_app_id",
         "deye_app_secret",
+        "deye_email",
+        "deye_password",
+        "deye_access_token",
         "deye_device_sn",
         "deye_station_id",
         "bmw_cardata_client_id",
+        "bmw_vin",
+        "bmw_cardata_access_token",
+        "bmw_cardata_refresh_token",
         "mini_cardata_client_id",
+        "mini_vin",
+        "mini_cardata_access_token",
+        "mini_cardata_refresh_token",
         "solar_latitude",
         "solar_longitude",
         "solar_kwp",

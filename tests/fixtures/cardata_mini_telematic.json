@@ -1,0 +1,28 @@
+{
+  "vin": "WMW0000000EXAMPLE2",
+  "telematicData": {
+    "vehicle.powertrain.electric.battery.stateOfCharge.displayed": {
+      "timestamp": "2026-11-14T21:50:00Z",
+      "unit": "%",
+      "value": 54
+    },
+    "vehicle.powertrain.electric.battery.stateOfCharge.target": {
+      "timestamp": "2026-11-14T21:50:00Z",
+      "unit": "%",
+      "value": 80
+    },
+    "vehicle.drivetrain.electricEngine.charging.status": {
+      "timestamp": "2026-11-14T21:50:00Z",
+      "value": "CHARGINGACTIVE"
+    },
+    "vehicle.body.chargingPort.status": {
+      "timestamp": "2026-11-14T21:50:00Z",
+      "value": "CONNECTED"
+    },
+    "vehicle.drivetrain.electricEngine.charging.timeRemaining": {
+      "timestamp": "2026-11-14T21:50:00Z",
+      "unit": "min",
+      "value": 35
+    }
+  }
+}
