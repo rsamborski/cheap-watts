@@ -36,6 +36,7 @@ class AppState(BaseModel):
     last_run_dry_run: bool | None = None
     last_deye_schedule: list[TouSlotRecord] = Field(default_factory=list)
     last_deye_updated_at: datetime | None = None
+    last_error_notified_at: datetime | None = None
     vehicle_alerts: dict[str, VehicleAlertRecord] = Field(default_factory=dict)
 
 
@@ -103,3 +104,15 @@ class StateStore:
     def clear_vehicle_alert(state: AppState, vehicle_key: str) -> None:
         """Clear stored alert state once a vehicle recovers above its SoC threshold."""
         state.vehicle_alerts.pop(vehicle_key, None)
+
+    @staticmethod
+    def should_notify_error(
+        state: AppState,
+        cooldown_hours: float,
+        now: datetime | None = None,
+    ) -> bool:
+        """Return True if a failure alert email may be sent outside cooldown."""
+        if state.last_error_notified_at is None:
+            return True
+        current_time = now or datetime.now(tz=UTC)
+        return (current_time - state.last_error_notified_at) >= timedelta(hours=cooldown_hours)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any, Protocol, runtime_checkable
@@ -26,16 +26,43 @@ logger = logging.getLogger("pstryk_pilot.clients.deye")
 _TOKEN_PATH = "/v1.0/account/token"
 _DEVICE_LATEST_PATH = "/v1.0/device/latest"
 _CONFIG_TOU_PATH = "/v1.0/config/tou"
+_CONFIG_TOU_UPDATE_PATH = "/v1.0/config/tou/update"
 
 _AUTH_ERROR_CODES = frozenset({"2101016", "2101017", "2101018", "2101019", "401", "403"})
 
 
 @runtime_checkable
 class InverterClient(Protocol):
-    """Abstract interface for reading inverter telemetry and TOU schedule state."""
+    """Abstract interface for reading inverter telemetry and mutating TOU schedule state."""
 
     def get_status(self) -> InverterStatus:
         """Fetch current battery SoC, PV/grid/load power, and configured TOU slots."""
+
+    def write_tou_schedule(
+        self,
+        slots: Sequence[TouSlot],
+        *,
+        dry_run: bool,
+        enable_tou: bool = True,
+    ) -> bool:
+        """Apply a 6-slot TOU schedule, strictly skipping remote writes when `dry_run=True`."""
+
+
+def _validate_six_tou_slots(slots: Sequence[TouSlot]) -> list[TouSlot]:
+    """Validate and return a contiguous 6-slot Deye TOU schedule ordered 1..6."""
+    if len(slots) != 6:
+        raise ValueError(f"Deye TOU write requires exactly 6 slots, got {len(slots)}")
+    ordered = sorted(slots, key=lambda s: s.slot_index)
+    if [s.slot_index for s in ordered] != [1, 2, 3, 4, 5, 6]:
+        raise ValueError("Deye TOU slots must have unique slot_index values 1..6")
+    for idx in range(6):
+        expected_next = ordered[(idx + 1) % 6].start_time
+        if ordered[idx].end_time != expected_next:
+            raise ValueError(
+                f"Non-contiguous TOU boundary at slot #{idx + 1}: "
+                f"end_time={ordered[idx].end_time} != next start_time={expected_next}"
+            )
+    return ordered
 
 
 def _parse_bool_flag(raw: Any, default: bool = False) -> bool:
@@ -253,6 +280,49 @@ class DeyeCloudClient:
         )
         return status
 
+    def write_tou_schedule(
+        self,
+        slots: Sequence[TouSlot],
+        *,
+        dry_run: bool,
+        enable_tou: bool = True,
+    ) -> bool:
+        """Write 6-slot TOU configuration via Deye Cloud Open API (skipped when `dry_run=True`)."""
+        ordered = _validate_six_tou_slots(slots)
+        if dry_run:
+            logger.info(
+                "Skipping Deye Cloud TOU write (dry_run=True)",
+                extra={"event": "deye_cloud_write_skipped_dry_run", "device_sn": self._device_sn},
+            )
+            return False
+
+        token = self.authenticate()
+        body: dict[str, Any] = {
+            "deviceSn": self._device_sn,
+            "timeUseSetting": enable_tou,
+            "timeUseSettingItems": [
+                {
+                    "slotIndex": s.slot_index,
+                    "startTime": s.start_time,
+                    "endTime": s.end_time,
+                    "soc": s.target_soc,
+                    "enableGridCharge": s.grid_charge,
+                    "enableSell": s.sell,
+                }
+                for s in ordered
+            ],
+        }
+        self._post_authenticated(_CONFIG_TOU_UPDATE_PATH, token=token, body=body)
+        logger.info(
+            "Updated Deye TOU schedule via Deye Cloud",
+            extra={
+                "event": "deye_cloud_tou_written",
+                "device_sn": self._device_sn,
+                "enable_tou": enable_tou,
+            },
+        )
+        return True
+
     def _post_authenticated(
         self,
         path: str,
@@ -455,6 +525,15 @@ def _decode_modbus_hhmm(raw: int, slot_index: int) -> str:
     return f"{hh:02d}:{mm:02d}"
 
 
+def _encode_modbus_hhmm(hhmm: str) -> int:
+    """Encode `HH:MM` (e.g. `'04:30'`) into Deye Modbus HHMM decimal integer (`430`)."""
+    hh_str, mm_str = hhmm.strip().split(":", maxsplit=1)
+    hh, mm = int(hh_str), int(mm_str)
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        raise ValueError(f"Invalid HH:MM value for Modbus encoding: {hhmm!r}")
+    return hh * 100 + mm
+
+
 class SolarmanV5Client:
     """Local LAN Solarman V5 Modbus-over-TCP client (`:8899`) implementing `InverterClient`."""
 
@@ -624,3 +703,98 @@ class SolarmanV5Client:
             },
         )
         return status
+
+    def write_tou_schedule(
+        self,
+        slots: Sequence[TouSlot],
+        *,
+        dry_run: bool,
+        enable_tou: bool = True,
+    ) -> bool:
+        """Write 6-slot TOU registers (`146, 148..153, 166..177`) over local Solarman V5."""
+        ordered = _validate_six_tou_slots(slots)
+        encoded_times = [_encode_modbus_hhmm(s.start_time) for s in ordered]
+        for idx in range(1, 6):
+            if encoded_times[idx] <= encoded_times[idx - 1]:
+                raise ValueError(
+                    "Deye Modbus TOU start_time values must be strictly ascending across slots 1..6"
+                )
+
+        if dry_run:
+            logger.info(
+                "Skipping local Solarman V5 TOU write (dry_run=True)",
+                extra={
+                    "event": "deye_local_write_skipped_dry_run",
+                    "host": self._host,
+                    "port": self._port,
+                },
+            )
+            return False
+
+        try:
+            conn = self._ensure_connected()
+            current_tou: list[int] = conn.read_holding_registers(
+                register_addr=_REG_TOU_BLOCK_START,
+                quantity=_REG_TOU_BLOCK_LEN,
+            )
+            if len(current_tou) < _REG_TOU_BLOCK_LEN:
+                raise PayloadParseError(
+                    f"Expected {_REG_TOU_BLOCK_LEN} TOU registers before write, "
+                    f"got {len(current_tou)}"
+                )
+
+            cur_enable = int(current_tou[_REG_TOU_ENABLE - _REG_TOU_BLOCK_START]) & 0xFFFF
+            if enable_tou:
+                # Preserve existing weekday/upper bits; enable Mon..Sun (0xFE) if unset
+                day_mask = (cur_enable & 0xFFFE) if (cur_enable & 0x00FE) else (cur_enable | 0x00FE)
+                target_enable = day_mask | 0x0001
+            else:
+                target_enable = cur_enable & ~0x0001
+
+            if target_enable != cur_enable:
+                conn.write_multiple_holding_registers(
+                    register_addr=_REG_TOU_ENABLE,
+                    values=[target_enable],
+                )
+
+            conn.write_multiple_holding_registers(
+                register_addr=_REG_TOU_TIME_1,
+                values=encoded_times,
+            )
+
+            soc_values = [int(s.target_soc) for s in ordered]
+            charge_offset = _REG_TOU_CHARGE_1 - _REG_TOU_BLOCK_START
+            charge_values = [
+                (
+                    (int(current_tou[charge_offset + idx]) & 0xFFFE)
+                    | (0x0001 if ordered[idx].grid_charge else 0x0000)
+                )
+                for idx in range(6)
+            ]
+            conn.write_multiple_holding_registers(
+                register_addr=_REG_TOU_SOC_1,
+                values=soc_values + charge_values,
+            )
+        except (NoSocketAvailableError, V5FrameError, OSError, TimeoutError) as exc:
+            self.close()
+            raise ApiClientError(
+                f"Deye local Solarman V5 write error ({self._host}:{self._port}): {exc}"
+            ) from exc
+        except Exception as exc:
+            if isinstance(exc, ApiClientError):
+                raise
+            self.close()
+            raise ApiClientError(
+                f"Deye local Modbus write error ({self._host}:{self._port}): {exc}"
+            ) from exc
+
+        logger.info(
+            "Updated Deye TOU schedule over local Solarman V5",
+            extra={
+                "event": "deye_local_tou_written",
+                "host": self._host,
+                "port": self._port,
+                "enable_tou": enable_tou,
+            },
+        )
+        return True

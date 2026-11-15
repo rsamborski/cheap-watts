@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import sys
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 
@@ -21,11 +22,19 @@ from src.clients.cardata import (
     CarDataTokenStore,
     CarDataVehicleConfig,
 )
+from src.clients.deye import DeyeCloudClient, SolarmanV5Client
 from src.clients.errors import ApiClientError
+from src.clients.pstryk import PstrykClient
+from src.clients.solar import SolarArray, SolarForecastClient
 from src.config import Settings, load_settings
+from src.engine.diff import diff_tou_schedules, evaluate_cycle_actions
+from src.engine.planner import plan_charging_schedule
 from src.logging_setup import setup_logging
+from src.models import TouSlot, VehicleStatus
+from src.notify.email import SmtpNotifier
 from src.probe import (
     ProbeTarget,
+    ServiceName,
     _mask_identifier,
     build_cardata_vehicles,
     format_probe_report,
@@ -99,9 +108,125 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def execute_run(settings: Settings, force_dry_run: bool = False) -> int:
-    """Execute one optimization cycle."""
+def _has_core_pipeline_config(settings: Settings) -> bool:
+    """Return True when Pstryk, Solar, and Deye inverter connectors are configured."""
+    has_pstryk = settings.pstryk_api_key is not None
+    has_solar = (
+        settings.solar_latitude is not None
+        and settings.solar_longitude is not None
+        and settings.solar_kwp is not None
+    )
+    has_local_deye = bool(settings.deye_modbus_host and settings.deye_logger_serial)
+    has_cloud_deye = bool(
+        settings.deye_device_sn
+        and (
+            settings.deye_access_token is not None
+            or (
+                settings.deye_app_id
+                and settings.deye_app_secret is not None
+                and settings.deye_email
+                and settings.deye_password is not None
+            )
+        )
+    )
+    return has_pstryk and has_solar and (has_local_deye or has_cloud_deye)
+
+
+def _build_extra_solar_arrays(settings: Settings) -> list[SolarArray]:
+    if settings.solar_kwp_2 is None:
+        return []
+    return [
+        SolarArray(
+            kwp=settings.solar_kwp_2,
+            tilt_degrees=(
+                settings.solar_tilt_degrees_2
+                if settings.solar_tilt_degrees_2 is not None
+                else settings.solar_tilt_degrees
+            ),
+            azimuth_degrees=(
+                settings.solar_azimuth_degrees_2
+                if settings.solar_azimuth_degrees_2 is not None
+                else settings.solar_azimuth_degrees
+            ),
+        )
+    ]
+
+
+@contextlib.contextmanager
+def _open_inverter_client(
+    settings: Settings,
+    transport: httpx.BaseTransport | None = None,
+    modbus_factory: Callable[..., Any] | None = None,
+) -> Any:
+    if settings.deye_modbus_host and settings.deye_logger_serial:
+        with SolarmanV5Client(
+            host=settings.deye_modbus_host,
+            logger_serial=settings.deye_logger_serial,
+            port=settings.deye_modbus_port,
+            device_sn=settings.deye_device_sn,
+            modbus_factory=modbus_factory,
+        ) as local_client:
+            yield local_client
+        return
+
+    assert settings.deye_device_sn is not None
+    with DeyeCloudClient(
+        device_sn=settings.deye_device_sn,
+        base_url=settings.deye_api_base_url,
+        access_token=settings.deye_access_token,
+        app_id=settings.deye_app_id,
+        app_secret=settings.deye_app_secret,
+        email=settings.deye_email,
+        password=settings.deye_password,
+        transport=transport,
+    ) as cloud_client:
+        yield cloud_client
+
+
+def _poll_vehicles_gracefully(
+    settings: Settings,
+    logger: logging.Logger,
+    transport: httpx.BaseTransport | None = None,
+) -> list[VehicleStatus]:
+    token_store = CarDataTokenStore(settings.cardata_tokens_file)
+    vehicles = [v for v in build_cardata_vehicles(settings) if v.has_credentials(token_store)]
+    if not vehicles:
+        return []
+
+    statuses: list[VehicleStatus] = []
+    with CarDataClient(
+        base_url=settings.cardata_base_url,
+        token_url=settings.cardata_token_url,
+        device_code_url=settings.cardata_device_code_url,
+        transport=transport,
+        token_store=token_store,
+    ) as client:
+        for veh in vehicles:
+            try:
+                statuses.append(client.fetch_vehicle_status(veh))
+            except Exception as exc:
+                logger.warning(
+                    "CarData poll failed for vehicle; continuing cycle without this EV",
+                    extra={
+                        "event": "cardata_poll_degraded",
+                        "vehicle": veh.vehicle_key,
+                        "error": str(exc),
+                    },
+                )
+    return statuses
+
+
+def execute_run(
+    settings: Settings,
+    force_dry_run: bool = False,
+    transports: Mapping[ServiceName, httpx.BaseTransport] | None = None,
+    modbus_factory: Callable[..., Any] | None = None,
+    smtp_factory: Callable[..., Any] | None = None,
+    now: datetime | None = None,
+) -> int:
+    """Execute one full end-to-end optimization cycle."""
     effective_dry_run = force_dry_run or settings.dry_run
+    current_time = now or datetime.now(tz=UTC)
     run_id = uuid.uuid4().hex[:8]
     log_path = setup_logging(
         settings.log_dir,
@@ -122,6 +247,9 @@ def execute_run(settings: Settings, force_dry_run: bool = False) -> int:
     )
 
     store = StateStore(settings.state_file)
+    notifier = SmtpNotifier(settings, smtp_factory=smtp_factory)
+    transport_map = transports or {}
+
     try:
         state = store.load()
         missing = settings.missing_live_settings()
@@ -136,24 +264,167 @@ def execute_run(settings: Settings, force_dry_run: bool = False) -> int:
                 },
             )
 
-        # Phase 2-4 pipeline hook: API polling, decision planner, Deye diff/write, and SMTP alerts.
+        if not _has_core_pipeline_config(settings):
+            logger.info(
+                "Skipping live optimization pipeline (core Pstryk/Solar/Deye config incomplete)",
+                extra={
+                    "event": "run_skipped_unconfigured",
+                    "run_id": run_id,
+                    "dry_run": effective_dry_run,
+                },
+            )
+            state.last_run_at = current_time
+            state.last_run_status = "ok"
+            state.last_run_dry_run = effective_dry_run
+            store.save(state)
+            return 0
+
+        assert settings.pstryk_api_key is not None
+        assert settings.solar_latitude is not None
+        assert settings.solar_longitude is not None
+        assert settings.solar_kwp is not None
+
+        with PstrykClient(
+            api_key=settings.pstryk_api_key,
+            base_url=settings.pstryk_base_url,
+            tz_name=settings.timezone,
+            transport=transport_map.get("pstryk"),
+        ) as pstryk_client:
+            price_slots = pstryk_client.fetch_today_and_tomorrow(reference_time=current_time)
+
+        with SolarForecastClient(
+            latitude=settings.solar_latitude,
+            longitude=settings.solar_longitude,
+            kwp=settings.solar_kwp,
+            base_url=settings.solar_base_url,
+            tilt_degrees=settings.solar_tilt_degrees,
+            azimuth_degrees=settings.solar_azimuth_degrees,
+            system_efficiency=settings.solar_system_efficiency,
+            tz_name=settings.timezone,
+            transport=transport_map.get("solar"),
+            extra_arrays=_build_extra_solar_arrays(settings),
+        ) as solar_client:
+            solar_forecast = solar_client.fetch_forecast(forecast_days=2)
+
+        vehicles = _poll_vehicles_gracefully(
+            settings=settings,
+            logger=logger,
+            transport=transport_map.get("cardata"),
+        )
+
+        # Clear alert cooldown state for vehicles that recharged above threshold
+        for veh in vehicles:
+            threshold = (
+                settings.bmw_soc_threshold
+                if veh.vehicle_key == "bmw"
+                else settings.mini_soc_threshold
+            )
+            if not veh.is_charging and veh.soc_pct > threshold:
+                StateStore.clear_vehicle_alert(state, veh.vehicle_key)
+
+        with _open_inverter_client(
+            settings=settings,
+            transport=transport_map.get("deye"),
+            modbus_factory=modbus_factory,
+        ) as deye_client:
+            inverter_status = deye_client.get_status()
+            plan = plan_charging_schedule(
+                settings=settings,
+                inverter=inverter_status,
+                price_slots=price_slots,
+                solar_forecast=solar_forecast,
+                vehicles=vehicles,
+                now=current_time,
+            )
+
+            hardware_diff = diff_tou_schedules(
+                current_slots=inverter_status.tou_slots,
+                target_slots=plan.target_tou_slots,
+                current_tou_enabled=inverter_status.tou_enabled,
+            )
+            if effective_dry_run and state.last_run_dry_run and len(state.last_deye_schedule) == 6:
+                baseline_slots = [TouSlot.from_record(r) for r in state.last_deye_schedule]
+                effective_diff = diff_tou_schedules(
+                    current_slots=baseline_slots,
+                    target_slots=plan.target_tou_slots,
+                    current_tou_enabled=True,
+                )
+            else:
+                effective_diff = hardware_diff
+
+            decision = evaluate_cycle_actions(
+                plan=plan,
+                schedule_diff=effective_diff,
+                state=state,
+                cooldown_hours=settings.alert_cooldown_hours,
+                dry_run=effective_dry_run,
+                now=current_time,
+            )
+
+            logger.info(
+                f"Plan rationale: {plan.rationale} | {hardware_diff.format_audit_log()}",
+                extra={
+                    "event": "plan_computed",
+                    "run_id": run_id,
+                    "dry_run": effective_dry_run,
+                    "solar_sufficient": plan.solar_sufficient,
+                    "grid_deficit_kwh": plan.grid_deficit_kwh,
+                    "deye_changed": effective_diff.has_changes,
+                    "ev_alerts": len(decision.notifiable_ev_recommendations),
+                },
+            )
+
+            if decision.should_write_deye and not effective_dry_run:
+                deye_client.write_tou_schedule(
+                    plan.target_tou_slots,
+                    dry_run=effective_dry_run,
+                    enable_tou=True,
+                )
+                state.last_deye_schedule = [s.to_record() for s in plan.target_tou_slots]
+                state.last_deye_updated_at = current_time
+            elif effective_dry_run and effective_diff.has_changes:
+                logger.info(
+                    "Dry-run mode active: skipped Deye TOU write",
+                    extra={"event": "deye_write_skipped_dry_run", "run_id": run_id},
+                )
+                state.last_deye_schedule = [s.to_record() for s in plan.target_tou_slots]
+
+        email_sent = False
+        if decision.should_send_email:
+            email_sent = notifier.send_cycle_notification(
+                plan=plan,
+                decision=decision,
+                inverter=inverter_status,
+            )
+            if email_sent:
+                for rec in decision.notifiable_ev_recommendations:
+                    StateStore.record_vehicle_notification(
+                        state=state,
+                        vehicle_key=rec.vehicle_key,
+                        soc=rec.soc_pct,
+                        recommended_window=rec.recommended_window,
+                        now=current_time,
+                    )
+
         logger.info(
-            "Optimization cycle completed (Phase 1 scaffold active)",
+            "Optimization cycle completed",
             extra={
                 "event": "run_complete",
                 "run_id": run_id,
                 "dry_run": effective_dry_run,
+                "deye_written": decision.should_write_deye and not effective_dry_run,
+                "email_sent": email_sent,
                 "tracked_deye_slots": len(state.last_deye_schedule),
                 "tracked_vehicle_alerts": sorted(state.vehicle_alerts.keys()),
             },
         )
 
-        state.last_run_at = datetime.now(tz=UTC)
+        state.last_run_at = current_time
         state.last_run_status = "ok"
         state.last_run_dry_run = effective_dry_run
         store.save(state)
         return 0
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "Unhandled error during pstryk-pilot run",
             extra={
@@ -162,6 +433,23 @@ def execute_run(settings: Settings, force_dry_run: bool = False) -> int:
                 "dry_run": effective_dry_run,
             },
         )
+        with contextlib.suppress(Exception):
+            err_state = store.load()
+            err_state.last_run_at = current_time
+            err_state.last_run_status = "error"
+            err_state.last_run_dry_run = effective_dry_run
+            if StateStore.should_notify_error(
+                err_state,
+                cooldown_hours=settings.alert_cooldown_hours,
+                now=current_time,
+            ) and notifier.send_failure_alert(
+                run_id=run_id,
+                error_summary=f"{exc.__class__.__name__}: {exc}",
+                dry_run=effective_dry_run,
+                now=current_time,
+            ):
+                err_state.last_error_notified_at = current_time
+            store.save(err_state)
         return 1
 
 

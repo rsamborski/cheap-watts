@@ -5,40 +5,170 @@
 [![Tests & Coverage — Pytest](https://github.com/rsamborski/pstryk-pilot/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/rsamborski/pstryk-pilot/actions/workflows/tests.yml)
 [![Security Scan — Gitleaks](https://github.com/rsamborski/pstryk-pilot/actions/workflows/security-scan.yml/badge.svg?branch=main)](https://github.com/rsamborski/pstryk-pilot/actions/workflows/security-scan.yml)
 
-A headless Home Energy Management System (HEMS) written in Python (`uv`), optimizing home battery storage and electric/hybrid vehicle charging based on **Pstryk** dynamic tariffs and solar (**PV**) forecasts.
+A headless Home Energy Management System (HEMS) written in Python 3.12+ (`uv`), invoked periodically via `cron` to optimize **Deye SUN-10K-SG04LP3-EU** home battery charging and **BMW / MINI** EV charging recommendations against **Pstryk** dynamic hourly tariffs and **Open-Meteo** solar forecasts.
 
 ---
 
-## 🎯 Project Goal
-Run periodically via `cron` to automatically schedule home battery grid-charging during the cheapest hours when solar production is insufficient, avoid simultaneous EV and home battery charging, and send actionable EV charging recommendations — with full local logging and a safe `--dry-run` mode.
+## ✨ Key Capabilities
+
+1. **PV-First Battery Strategy:**
+   - **Sufficient Sun (`24h PV >= SOLAR_SUFFICIENT_KWH_THRESHOLD`):** Turns Deye Time-of-Use (TOU) **grid-charging OFF** across all 6 slots so rooftop PV charges the home battery for free.
+   - **Low Sun / Cloudy Weather:** Dynamically sizes grid energy deficit (`min(target_soc, min_soc + typical_daily_usage) - current_soc - expected_pv`) and selects the globally cheapest **1–2 contiguous Pstryk windows** mapped cleanly onto Deye's 6-slot `00:00..24:00` TOU ring.
+2. **EV Priority & Strict Non-Overlap (BMW & MINI):**
+   - **Active EV Session Detection:** If BMW CarData reports an EV is actively charging, skips redundant EV alerts and blocks those hours from Deye grid-charging.
+   - **Post-EV Battery Ordering:** Whenever an EV is actively charging or recommended a charging window (`BMW <= 20%`, `MINI <= 40%`), Deye home battery grid-charging is scheduled **strictly after** the EV window so EV charging never drains freshly grid-charged battery capacity.
+   - **Sun Slow-Charge vs. Cheap Grid:** Recommends daytime slow-charge (`EV_SLOW_CHARGE_AMPS`, e.g. `8A`) on sunny days and cheapest contiguous Pstryk hours on cloudy days.
+3. **Local LAN Inverter Control (Zero Cloud Rate Limits):**
+   - Talks directly to the Deye / **SOLARMAN Smart** Wi-Fi stick logger over local TCP (`:8899` via `pysolarmanv5`), preserving weekday/generator bitmasks on TOU registers (`146, 148..153, 166..177`), with Deye Cloud Open API kept as an optional fallback.
+4. **Signal-Only SMTP Alerts & Safe `--dry-run` Mode:**
+   - Sends emails **only when actionable changes occur** (a Deye TOU schedule update or a new EV recommendation outside cooldown).
+   - `--dry-run` executes all live read APIs and planning, **strictly skips all Deye writes**, and prefixes change/alert emails with `[DRY-RUN]`.
 
 ---
 
-## 🧩 Components & Interfaces
+## 🚀 Quick Start
 
-### 1. Dynamic Energy Tariffs: **Pstryk**
-* **Interface:** [Pstryk Backend API](https://pstryk.pl)
-* **Authentication:** Personal API key generated in the Pstryk mobile app (*Account > Devices and integrations*).
-* **Role:** Provides current and next-day hourly electricity prices used to pick optimal charging windows (strictly for personal, non-commercial use).
+### Prerequisites
+- Linux / WSL2 / macOS with Python `>= 3.12` and [`uv`](https://docs.astral.sh/uv/).
 
-### 2. Inverter & Battery Storage: **Deye SUN-10K-SG04LP3-EU**
-* **Primary Interface:** **Deye Cloud / Solarman Open API** (`App ID` + `App Secret`), wrapped behind a clean adapter interface so local polling (Solarman V5 TCP / Modbus RS-485) can be added in the future.
-* **Role:** Reads battery State of Charge (SoC), live PV output, and current Time-of-Use (TOU) settings; updates TOU grid-charging schedules when needed.
+```bash
+# 1. Install dependencies
+uv sync
 
-### 3. Vehicles: **BMW & MINI**
-* **Interface:** **BMW CarData API** (official read-only telemetry across BMW and MINI).
-* **Role:** Monitors battery SoC and active charging status:
-  * **Charging Recommendations:** Sends an email alert when a vehicle needs charging (`BMW <= 20%`, `MINI <= 40%`), recommending either daytime slow-charging on solar surplus or the cheapest tariff hours.
-  * **Conflict Prevention:** Reserves EV charging windows and blocks Deye grid-charging whenever a vehicle is actively charging so the home battery and EV never charge from the grid at the same time.
-
-### 4. Solar Forecast & Notifications
-* **PV Forecast:** Uses **Open-Meteo** solar forecasts alongside Deye telemetry — when enough sun is expected, Deye grid-charging is turned off so the battery charges naturally from PV.
-* **Email Alerts (SMTP):** Sends notifications only when changes occur (updated Deye schedule or a new EV charging recommendation), prefixed with `[DRY-RUN]` when running in dry-run mode.
+# 2. Create your local .env (never committed to git)
+cp .env.example .env
+```
 
 ---
 
-## 🏗️ High-Level Flow
+## 🔑 Credential & Hardware Setup
 
-1. **Data Collection:** Fetches Pstryk hourly prices, Deye battery/PV state, BMW & MINI telemetry, and solar forecast.
-2. **Decision Engine:** Evaluates EV charging status/thresholds, checks whether expected PV is sufficient to fill the home battery, and computes non-overlapping cheapest grid-charge slots when needed.
-3. **Execution & Audit:** Applies schedule changes to Deye (or logs the planned diff without modifying the inverter in `--dry-run` mode), records every step to rotating local logs, and sends change-driven email summaries.
+### 1. Pstryk Dynamic Tariffs (`PSTRYK_API_KEY`)
+1. Open the **Pstryk** mobile app -> **Account -> Devices and integrations**.
+2. Generate a personal API token (`sk-...`) and set `PSTRYK_API_KEY` in `.env`.
+
+### 2. Deye `SUN-10K-SG04LP3-EU` via Local LAN (`SOLARMAN Smart`)
+1. Find the **10-digit logger serial number** (`27...`) in the **SOLARMAN Smart** app (*Device -> Logger*) or on the Wi-Fi stick label.
+2. Reserve a **static DHCP lease** for the logger on your home router so its LAN IP never changes.
+3. Set in `.env`:
+   ```dotenv
+   DEYE_MODBUS_HOST=192.168.1.50
+   DEYE_MODBUS_PORT=8899
+   DEYE_LOGGER_SERIAL=2700012345
+   ```
+
+### 3. Solar / PV Forecast (`Open-Meteo` — No API Key Required)
+Set your home coordinates and array kWp. Single-plane and dual-string (e.g., East `-90.0` / West `90.0`) setups are supported:
+```dotenv
+SOLAR_LATITUDE=52.23
+SOLAR_LONGITUDE=21.01
+SOLAR_KWP=5.0
+SOLAR_TILT_DEGREES=35.0
+SOLAR_AZIMUTH_DEGREES=-90.0
+# Optional 2nd string:
+SOLAR_KWP_2=5.0
+SOLAR_TILT_DEGREES_2=35.0
+SOLAR_AZIMUTH_DEGREES_2=90.0
+```
+
+### 4. BMW & MINI (`BMW CarData` OAuth 2.0 PKCE)
+1. Log in to the **My BMW** / **MINI** web portal -> **BMW CarData** -> **Create CarData Client**.
+2. Enable the `cardata:api:read` scope and copy the generated **Client ID** (UUID) into `.env`:
+   ```dotenv
+   BMW_CARDATA_CLIENT_ID=<bmw-client-uuid>
+   MINI_CARDATA_CLIENT_ID=<mini-client-uuid>
+   ```
+3. Run the interactive browser authorization once per account:
+   ```bash
+   uv run pstryk-pilot cardata-auth
+   # Or authorize a single vehicle when accounts belong to different drivers:
+   uv run pstryk-pilot cardata-auth -v bmw
+   uv run pstryk-pilot cardata-auth -v mini
+   ```
+   `pstryk-pilot` automatically provisions/reuses the `pstryk-pilot` telematics container, discovers VINs, and stores `0600`-protected rotated refresh tokens in `data/cardata_tokens.json`.
+
+### 5. SMTP Email Notifications
+Configure any standard SMTP provider (for Gmail, create a 16-character **App Password** under Google Account Security):
+```dotenv
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=your.account@example.com
+SMTP_PASSWORD=your-app-password
+SMTP_USE_TLS=true
+SMTP_FROM_EMAIL=your.account@example.com
+SMTP_TO_EMAIL=driver1@example.com, driver2@example.com
+```
+
+---
+
+## 🛠️ CLI Commands
+
+```bash
+# Verify read-only connectivity across all configured integrations (or a single service):
+uv run pstryk-pilot probe
+uv run pstryk-pilot probe -s deye
+
+# Check configuration readiness and last persisted state:
+uv run pstryk-pilot status
+
+# Run one full optimization cycle in safe simulation mode (no inverter writes, [DRY-RUN] emails):
+uv run pstryk-pilot run --dry-run
+
+# Run one live optimization cycle (applies Deye TOU updates when schedule changes):
+uv run pstryk-pilot run
+```
+
+---
+
+## ⚙️ Key Environment Variables
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `PSTRYK_API_KEY` | *(required)* | Personal Pstryk API token (`Authorization: <token>`). |
+| `DEYE_MODBUS_HOST` / `DEYE_LOGGER_SERIAL` | *(required)* | Local LAN IP and 10-digit SN of Deye / Solarman V5 Wi-Fi stick (`:8899`). |
+| `BATTERY_CAPACITY_KWH` | `10.0` | Total usable home battery capacity in kWh. |
+| `BATTERY_MIN_SOC` / `BATTERY_TARGET_SOC` | `20` / `95` | Discharge floor SoC (%) and max grid-charge ceiling SoC (%). |
+| `BATTERY_MAX_CHARGE_KW` | `5.0` | Expected grid charging power (kW) used to size window duration. |
+| `TYPICAL_DAILY_USAGE_KWH` | `12.0` | Daily household kWh target capping low-sun battery grid-charging. |
+| `SOLAR_SUFFICIENT_KWH_THRESHOLD` | `12.0` | 24h PV kWh threshold at/above which Deye grid-charging is disabled. |
+| `BMW_SOC_THRESHOLD` / `MINI_SOC_THRESHOLD` | `20` / `40` | EV SoC (%) thresholds triggering charging recommendations. |
+| `EV_SLOW_CHARGE_AMPS` | `8` | Recommended slow-charge current (`6–16A`) during sunny PV windows. |
+| `ALERT_COOLDOWN_HOURS` | `12` | Minimum hours before repeating an unchanged EV/error alert. |
+| `DRY_RUN` | `false` | Set `true` (or pass `--dry-run`) to skip all Deye writes globally. |
+
+---
+
+## 🕒 Deployment (`cron` & `Docker`)
+
+### Option A: Native Linux / Host `cron`
+See [`deploy/crontab.example`](deploy/crontab.example). Schedule every **30 minutes** (`48 runs/day`, staying within BMW CarData's 50 requests/day quota per account):
+
+1. **Burn-in with `--dry-run` first:**
+   ```cron
+   */30 * * * * cd /path/to/pstryk-pilot && uv run pstryk-pilot run --dry-run >> /path/to/pstryk-pilot/logs/cron.log 2>&1
+   ```
+   Review `logs/pstryk-pilot.log` and `[DRY-RUN]` emails over several cycles/days.
+2. **Switch to live writes:** remove `--dry-run` (and ensure `DRY_RUN=false` in `.env`).
+
+### Option B: Docker
+```bash
+docker build -t pstryk-pilot:latest .
+
+# Run a single --dry-run cycle (--network host allows reaching local LAN :8899):
+docker run --rm --network host \
+  --env-file .env \
+  -v "$(pwd)/data:/app/data" \
+  -v "$(pwd)/logs:/app/logs" \
+  pstryk-pilot:latest run --dry-run
+```
+
+---
+
+## 🧪 Development & Quality Gates
+
+```bash
+uv run black src tests
+uv run ruff check --fix src tests
+uv run pytest --cov=src --cov-report=term-missing
+uv run pre-commit run --all-files
+```

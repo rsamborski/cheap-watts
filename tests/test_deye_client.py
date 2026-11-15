@@ -414,3 +414,97 @@ def test_solarman_v5_client_validation_and_error_handling() -> None:
             pytest.raises(PayloadParseError),
         ):
             bad_client.get_status()
+
+
+def test_solarman_and_cloud_write_tou_schedule_and_dry_run_invariant() -> None:
+    from src.models import TouSlot
+
+    valid_slots = [
+        TouSlot(
+            slot_index=1, start_time="00:00", end_time="02:00", target_soc=20, grid_charge=False
+        ),
+        TouSlot(
+            slot_index=2, start_time="02:00", end_time="04:30", target_soc=85, grid_charge=True
+        ),
+        TouSlot(
+            slot_index=3, start_time="04:30", end_time="09:00", target_soc=20, grid_charge=False
+        ),
+        TouSlot(
+            slot_index=4, start_time="09:00", end_time="14:00", target_soc=20, grid_charge=False
+        ),
+        TouSlot(
+            slot_index=5, start_time="14:00", end_time="19:00", target_soc=20, grid_charge=False
+        ),
+        TouSlot(
+            slot_index=6, start_time="19:00", end_time="00:00", target_soc=20, grid_charge=False
+        ),
+    ]
+
+    # 1. Local Solarman V5: dry_run=True MUST NOT connect or write any registers
+    writes: list[tuple[int, list[int]]] = []
+    tou_regs = [0] * 32
+    tou_regs[0] = 0x0000  # TOU disabled initially
+    tou_regs[(172 - 146) + 1] = 0x0002  # Generator bit 1 set on slot #2 -> must be preserved!
+
+    class RecordingModbus:
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            pass
+
+        def read_holding_registers(self, register_addr: int, quantity: int) -> list[int]:
+            assert register_addr == 146 and quantity == 32
+            return list(tou_regs)
+
+        def write_multiple_holding_registers(self, register_addr: int, values: list[int]) -> None:
+            writes.append((register_addr, list(values)))
+
+        def disconnect(self) -> None:
+            pass
+
+    with SolarmanV5Client(
+        host="192.168.1.50",
+        logger_serial=2700012345,
+        modbus_factory=RecordingModbus,
+    ) as local_client:
+        assert local_client.write_tou_schedule(valid_slots, dry_run=True) is False
+        assert writes == []
+
+        assert local_client.write_tou_schedule(valid_slots, dry_run=False, enable_tou=True) is True
+
+    assert writes == [
+        (146, [0x00FF]),
+        (148, [0, 200, 430, 900, 1400, 1900]),
+        (166, [20, 85, 20, 20, 20, 20, 0, 0x0003, 0, 0, 0, 0]),
+    ]
+
+    # 2. Deye Cloud: dry_run=True skips HTTP POST; dry_run=False posts /v1.0/config/tou/update
+    cloud_posts: list[str] = []
+
+    def cloud_handler(request: httpx.Request) -> httpx.Response:
+        cloud_posts.append(request.url.path)
+        return httpx.Response(200, json={"success": True, "code": "1000000"})
+
+    with DeyeCloudClient(
+        device_sn="DEYE0000EXAMPLE1",
+        access_token=SecretStr("test-api-key"),
+        transport=httpx.MockTransport(cloud_handler),
+    ) as cloud_client:
+        assert cloud_client.write_tou_schedule(valid_slots, dry_run=True) is False
+        assert cloud_posts == []
+
+        assert cloud_client.write_tou_schedule(valid_slots, dry_run=False) is True
+        assert cloud_posts == ["/v1.0/config/tou/update"]
+
+    # 3. Validation errors (wrong count, duplicate index, non-contiguous, non-ascending)
+    with SolarmanV5Client(
+        host="192.168.1.50",
+        logger_serial=2700012345,
+        modbus_factory=RecordingModbus,
+    ) as val_client:
+        with pytest.raises(ValueError, match="exactly 6"):
+            val_client.write_tou_schedule(valid_slots[:4], dry_run=True)
+        bad_boundary = list(valid_slots)
+        bad_boundary[0] = TouSlot(
+            slot_index=1, start_time="00:00", end_time="03:00", target_soc=20, grid_charge=False
+        )
+        with pytest.raises(ValueError, match="Non-contiguous"):
+            val_client.write_tou_schedule(bad_boundary, dry_run=True)

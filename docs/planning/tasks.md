@@ -35,14 +35,14 @@ Track progress across implementation phases. Update checkboxes as tasks are comp
 - [x] Add comprehensive unit tests (`tests/test_planner.py`, `tests/test_diff.py`) covering sunny summer (grid-charge OFF), cloudy winter, active EV charging (no EV alert, email sent if Deye schedule changes to block overlap), post-EV grid-charge ordering, 1–2x/day window limit, daily usage cap, no-op steady state (no email), missing next-day prices, and dry-run invariants.
 
 ## Phase 4: Deye Write Execution & SMTP Notifications
-- [ ] Implement Deye Cloud / Solarman TOU write method in `src/clients/deye.py` gated strictly behind `not dry_run`.
-- [ ] Implement SMTP email notifier (`src/notify/email.py`) triggered **whenever and only when Deye TOU schedule changes (including blocking hours for an actively charging EV or disabling grid-charge for sun) or a new EV recommendation occurs**.
-- [ ] Enforce `[DRY-RUN]` subject/body prefix when running in `--dry-run` mode and cooldown deduplication via `state.py`.
-- [ ] Wire full end-to-end pipeline in `src/main.py` with top-level error logging and optional failure alert email.
+- [x] Implement Deye Cloud / Solarman TOU write method in `src/clients/deye.py` gated strictly behind `not dry_run`.
+- [x] Implement SMTP email notifier (`src/notify/email.py`) triggered **whenever and only when Deye TOU schedule changes (including blocking hours for an actively charging EV or disabling grid-charge for sun) or a new EV recommendation occurs**.
+- [x] Enforce `[DRY-RUN]` subject/body prefix when running in `--dry-run` mode and cooldown deduplication via `state.py`.
+- [x] Wire full end-to-end pipeline in `src/main.py` with top-level error logging and optional failure alert email.
 
 ## Phase 5: Dry-Run Validation & Deployment Packaging
-- [ ] Add `Dockerfile` and sample `crontab` configuration.
-- [ ] Document setup, environment variables, API credential generation, and cron installation in `README.md`.
+- [x] Add `Dockerfile` and sample `crontab` configuration.
+- [x] Document setup, environment variables, API credential generation, and cron installation in `README.md`.
 - [ ] Validate end-to-end `--dry-run` execution against live APIs and verify `[DRY-RUN]` email output.
 
 ---

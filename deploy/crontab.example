@@ -1,0 +1,24 @@
+# ==============================================================================
+# pstryk-pilot — Sample crontab configuration
+# ==============================================================================
+# Install with: crontab -e
+#
+# Schedule frequency: every 30 minutes (48 runs/day).
+# Why 30m instead of 15m? BMW Group CarData enforces a 50 API requests/day
+# quota per account; 48 runs/day stays safely below the daily cap while catching
+# both EV plug-in events and daily Pstryk Day-Ahead tariff publication (~14:00).
+# ==============================================================================
+
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# --- Stage 1: Dry-Run Burn-In (recommended for the first few days) ---
+# Reads live APIs, logs diffs, and sends [DRY-RUN] emails without mutating Deye:
+*/30 * * * * cd /path/to/pstryk-pilot && uv run pstryk-pilot run --dry-run >> /path/to/pstryk-pilot/logs/cron.log 2>&1
+
+# --- Stage 2: Live Production Execution (uncomment & disable Stage 1 once verified) ---
+# */30 * * * * cd /path/to/pstryk-pilot && uv run pstryk-pilot run >> /path/to/pstryk-pilot/logs/cron.log 2>&1
+
+# --- Alternative: Docker One-Shot Container via Host Cron ---
+# Note: requires --network host (or LAN routing) when using local Solarman V5 (:8899).
+# */30 * * * * docker run --rm --network host --env-file /opt/pstryk-pilot/.env -v /opt/pstryk-pilot/data:/app/data -v /opt/pstryk-pilot/logs:/app/logs pstryk-pilot:latest run --dry-run
