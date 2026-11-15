@@ -56,18 +56,12 @@ def build_cardata_vehicles(settings: Settings) -> list[CarDataVehicleConfig]:
             display_name="BMW",
             client_id=settings.bmw_cardata_client_id,
             vin=settings.bmw_vin,
-            container_id=settings.bmw_cardata_container_id,
-            access_token=settings.bmw_cardata_access_token,
-            refresh_token=settings.bmw_cardata_refresh_token,
         ),
         CarDataVehicleConfig(
             vehicle_key="mini",
             display_name="MINI",
             client_id=settings.mini_cardata_client_id,
             vin=settings.mini_vin,
-            container_id=settings.mini_cardata_container_id,
-            access_token=settings.mini_cardata_access_token,
-            refresh_token=settings.mini_cardata_refresh_token,
         ),
     ]
 

@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     battery_target_soc: int = Field(default=95, ge=10, le=100)
     battery_min_soc: int = Field(default=20, ge=5, le=90)
     battery_max_charge_kw: float = Field(default=5.0, gt=0)
+    typical_daily_usage_kwh: float = Field(default=12.0, gt=0)
 
     # --- BMW CarData (BMW & MINI) ---
     cardata_base_url: str = "https://api-cardata.bmwgroup.com"
@@ -47,14 +48,8 @@ class Settings(BaseSettings):
     cardata_token_url: str = "https://customer.bmwgroup.com/gcdm/oauth/token"
     bmw_cardata_client_id: str | None = None
     bmw_vin: str | None = None
-    bmw_cardata_container_id: str | None = None
-    bmw_cardata_access_token: SecretStr | None = None
-    bmw_cardata_refresh_token: SecretStr | None = None
     mini_cardata_client_id: str | None = None
     mini_vin: str | None = None
-    mini_cardata_container_id: str | None = None
-    mini_cardata_access_token: SecretStr | None = None
-    mini_cardata_refresh_token: SecretStr | None = None
     bmw_soc_threshold: int = Field(default=20, ge=5, le=95)
     mini_soc_threshold: int = Field(default=40, ge=5, le=95)
     ev_slow_charge_amps: int = Field(default=8, ge=6, le=16)
@@ -103,14 +98,8 @@ class Settings(BaseSettings):
         "deye_station_id",
         "bmw_cardata_client_id",
         "bmw_vin",
-        "bmw_cardata_container_id",
-        "bmw_cardata_access_token",
-        "bmw_cardata_refresh_token",
         "mini_cardata_client_id",
         "mini_vin",
-        "mini_cardata_container_id",
-        "mini_cardata_access_token",
-        "mini_cardata_refresh_token",
         "solar_latitude",
         "solar_longitude",
         "solar_kwp",

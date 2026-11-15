@@ -274,10 +274,7 @@ def execute_cardata_auth(
                     sleep_fn=sleep_fn,
                 )
                 access_raw = bundle.access_token.get_secret_value()
-
-                shared_container_id: str | None = None
-                if any(not (v.container_id and v.container_id.strip()) for v in group_vehicles):
-                    shared_container_id = client.ensure_container(access_raw)
+                container_id = client.ensure_container(access_raw)
 
                 now = datetime.now(tz=UTC)
                 for veh in group_vehicles:
@@ -285,11 +282,6 @@ def execute_cardata_auth(
                         veh.vin.strip()
                         if veh.vin and veh.vin.strip()
                         else client.discover_vin(access_raw, vehicle_key=veh.vehicle_key)
-                    )
-                    veh_container = (
-                        veh.container_id.strip()
-                        if veh.container_id and veh.container_id.strip()
-                        else shared_container_id
                     )
                     token_store.upsert(
                         veh.vehicle_key,
@@ -299,7 +291,7 @@ def execute_cardata_auth(
                             expires_at=now + timedelta(seconds=bundle.expires_in),
                             client_id=client_id,
                             vin=vin,
-                            container_id=veh_container,
+                            container_id=container_id,
                             updated_at=now,
                         ),
                     )
@@ -313,7 +305,7 @@ def execute_cardata_auth(
                     print(
                         f"  [OK] {veh.display_name} authorized | "
                         f"VIN: {_mask_identifier(vin)} | "
-                        f"Container: {_mask_identifier(veh_container)}",
+                        f"Container: {_mask_identifier(container_id)}",
                         flush=True,
                     )
     except ApiClientError as exc:

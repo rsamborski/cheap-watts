@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +11,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
+from src.clients.cardata import CarDataTokenRecord, CarDataTokenStore
 from src.config import Settings
 from src.main import main
 from src.probe import _mask_identifier, format_probe_report, run_probes
@@ -40,7 +41,7 @@ def test_run_probes_skips_all_when_unconfigured() -> None:
     assert "[SKIP] cardata" in report
 
 
-def test_run_probes_all_services_succeed_with_fixtures() -> None:
+def test_run_probes_all_services_succeed_with_fixtures(tmp_path: Path) -> None:
     pstryk_bytes = (FIXTURES / "pstryk_unified_metrics.json").read_bytes()
     solar_bytes = (FIXTURES / "open_meteo_forecast.json").read_bytes()
     latest_bytes = (FIXTURES / "deye_device_latest.json").read_bytes()
@@ -59,6 +60,19 @@ def test_run_probes_all_services_succeed_with_fixtures() -> None:
             return httpx.Response(200, content=bmw_bytes)
         raise AssertionError(f"Unexpected CarData path: {request.url.path}")
 
+    tokens_file = tmp_path / "cardata_tokens.json"
+    CarDataTokenStore(tokens_file).upsert(
+        "bmw",
+        CarDataTokenRecord(
+            access_token=SecretStr("test-api-key"),
+            refresh_token=SecretStr("test-api-key"),
+            expires_at=datetime.now(tz=UTC) + timedelta(hours=1),
+            client_id="example-bmw-client",
+            vin="WBA0000000EXAMPLE1",
+            container_id="CONT0000EXAMPLE1",
+        ),
+    )
+
     settings = Settings(
         _env_file=None,
         pstryk_api_key=SecretStr("test-api-key"),
@@ -67,8 +81,9 @@ def test_run_probes_all_services_succeed_with_fixtures() -> None:
         solar_kwp=10.0,
         deye_device_sn="DEYE0000EXAMPLE1",
         deye_access_token=SecretStr("test-api-key"),
+        bmw_cardata_client_id="example-bmw-client",
         bmw_vin="WBA0000000EXAMPLE1",
-        bmw_cardata_access_token=SecretStr("test-api-key"),
+        cardata_tokens_file=tokens_file,
     )
 
     transports = {
@@ -97,7 +112,7 @@ def test_run_probes_all_services_succeed_with_fixtures() -> None:
     assert "test-api-key" not in report
 
 
-def test_run_probes_handles_failures_and_partial_data() -> None:
+def test_run_probes_handles_failures_and_partial_data(tmp_path: Path) -> None:
     today_only_bytes = (FIXTURES / "pstryk_today_only.json").read_bytes()
     mini_bytes = (FIXTURES / "cardata_mini_telematic.json").read_bytes()
 
@@ -108,6 +123,24 @@ def test_run_probes_handles_failures_and_partial_data() -> None:
             return httpx.Response(200, content=mini_bytes)
         raise AssertionError(f"Unexpected path: {request.url.path}")
 
+    tokens_file = tmp_path / "cardata_tokens.json"
+    token_store = CarDataTokenStore(tokens_file)
+    for key, cid, vin in (
+        ("bmw", "example-bmw-client", "WBA0000000EXAMPLE1"),
+        ("mini", "example-mini-client", "WMW0000000EXAMPLE2"),
+    ):
+        token_store.upsert(
+            key,
+            CarDataTokenRecord(
+                access_token=SecretStr("test-api-key"),
+                refresh_token=SecretStr("test-api-key"),
+                expires_at=datetime.now(tz=UTC) + timedelta(hours=1),
+                client_id=cid,
+                vin=vin,
+                container_id="CONT0000EXAMPLE1",
+            ),
+        )
+
     settings = Settings(
         _env_file=None,
         pstryk_api_key=SecretStr("test-api-key"),
@@ -116,10 +149,11 @@ def test_run_probes_handles_failures_and_partial_data() -> None:
         solar_kwp=10.0,
         deye_device_sn="DEYE0000EXAMPLE1",
         deye_access_token=SecretStr("test-api-key"),
+        bmw_cardata_client_id="example-bmw-client",
         bmw_vin="WBA0000000EXAMPLE1",
-        bmw_cardata_access_token=SecretStr("test-api-key"),
+        mini_cardata_client_id="example-mini-client",
         mini_vin="WMW0000000EXAMPLE2",
-        mini_cardata_access_token=SecretStr("test-api-key"),
+        cardata_tokens_file=tokens_file,
     )
 
     transports = {
