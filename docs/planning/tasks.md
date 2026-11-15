@@ -59,3 +59,8 @@ Track progress across implementation phases. Update checkboxes as tasks are comp
 - [ ] Add a daily CLI subcommand/mode (e.g., `pstryk-pilot analyze-usage`) and sample daily `cron` entry to fetch past days of real usage and compute usage patterns.
 - [ ] Persist learned usage profile in `state.py` and feed it into the grid-charging planner with a configurable 10–20% buffer (replacing/refining static `TYPICAL_DAILY_USAGE_KWH`).
 - [ ] Add unit tests with historical usage fixtures, buffer calculation, and fallback to static `TYPICAL_DAILY_USAGE_KWH`.
+
+### 3. Missed EV Charging Window Re-Notification
+- [ ] Persist the recommended EV charging window (start/end timestamps and vehicle ID) in `state.py`.
+- [ ] Detect when a previously recommended EV window has elapsed without charging occurring and the EV remains below its SoC threshold, then clear/update deduplication state so a new best window is planned and emailed.
+- [ ] Add unit tests covering missed window detection, next-best window selection, and avoiding duplicate alerts while the current window is still active.

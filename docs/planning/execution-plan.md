@@ -146,3 +146,7 @@ The following features are planned for implementation after the core v1 function
    - Add a separate CLI mode/subcommand (e.g., `pstryk-pilot analyze-usage`) intended to run once daily via `cron`.
    - Fetch historical daily/hourly electrical consumption from the Deye Cloud API (subject to API data availability) and analyze usage patterns.
    - Feed the learned daily usage patterns (plus a configurable 10–20% safety buffer) into the grid-charging planner, replacing or refining the static `TYPICAL_DAILY_USAGE_KWH` setting so the battery charges only what is needed to cover typical daily consumption.
+
+3. **Missed EV Charging Window Re-Notification:**
+   - Track the recommended EV charging window in local state (`state.py`).
+   - If the recommended window passes without the EV having started charging (e.g., due to urgent travel) and the vehicle is still below its SoC threshold, automatically select the next best available charging window (sun slow-charge or cheapest upcoming Pstryk hours) and send a follow-up notification.
