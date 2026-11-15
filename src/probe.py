@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import httpx
 
 from src import __version__
 from src.clients.cardata import CarDataClient, CarDataVehicleConfig
-from src.clients.deye import DeyeCloudClient
+from src.clients.deye import DeyeCloudClient, SolarmanV5Client
 from src.clients.errors import ApiClientError
 from src.clients.pstryk import PstrykClient
 from src.clients.solar import SolarArray, SolarForecastClient
@@ -239,8 +239,10 @@ def probe_solar(
 def probe_deye(
     settings: Settings,
     transport: httpx.BaseTransport | None = None,
+    modbus_factory: Callable[..., Any] | None = None,
 ) -> ProbeResult:
-    """Probe Deye Cloud inverter telemetry and current 6-slot TOU schedule (read-only)."""
+    """Probe Deye inverter telemetry and current 6-slot TOU schedule (Local LAN or Cloud)."""
+    has_local_lan = bool(settings.deye_modbus_host and settings.deye_logger_serial)
     has_direct_token = settings.deye_access_token is not None
     has_account_creds = all(
         (
@@ -250,28 +252,45 @@ def probe_deye(
             settings.deye_password is not None,
         )
     )
-    if not settings.deye_device_sn or (not has_direct_token and not has_account_creds):
+    has_cloud = bool(settings.deye_device_sn and (has_direct_token or has_account_creds))
+
+    if not has_local_lan and not has_cloud:
         return ProbeResult(
             service="deye",
             status="skipped",
             headline=(
-                "Not configured (set DEYE_DEVICE_SN plus DEYE_ACCESS_TOKEN or "
-                "DEYE_APP_ID/DEYE_APP_SECRET/DEYE_EMAIL/DEYE_PASSWORD in .env)"
+                "Not configured (set DEYE_MODBUS_HOST + DEYE_LOGGER_SERIAL for local LAN, "
+                "or DEYE_DEVICE_SN + Deye Cloud credentials in .env)"
             ),
         )
 
     try:
-        with DeyeCloudClient(
-            device_sn=settings.deye_device_sn,
-            base_url=settings.deye_api_base_url,
-            access_token=settings.deye_access_token,
-            app_id=settings.deye_app_id,
-            app_secret=settings.deye_app_secret,
-            email=settings.deye_email,
-            password=settings.deye_password,
-            transport=transport,
-        ) as client:
-            status = client.get_status()
+        if has_local_lan:
+            assert settings.deye_modbus_host is not None
+            assert settings.deye_logger_serial is not None
+            mode_label = f"local-lan ({settings.deye_modbus_host}:{settings.deye_modbus_port})"
+            with SolarmanV5Client(
+                host=settings.deye_modbus_host,
+                logger_serial=settings.deye_logger_serial,
+                port=settings.deye_modbus_port,
+                device_sn=settings.deye_device_sn,
+                modbus_factory=modbus_factory,
+            ) as local_client:
+                status = local_client.get_status()
+        else:
+            assert settings.deye_device_sn is not None
+            mode_label = "deye-cloud"
+            with DeyeCloudClient(
+                device_sn=settings.deye_device_sn,
+                base_url=settings.deye_api_base_url,
+                access_token=settings.deye_access_token,
+                app_id=settings.deye_app_id,
+                app_secret=settings.deye_app_secret,
+                email=settings.deye_email,
+                password=settings.deye_password,
+                transport=transport,
+            ) as cloud_client:
+                status = cloud_client.get_status()
     except (ApiClientError, Exception) as exc:
         logger.warning(
             "Deye probe failed",
@@ -280,7 +299,7 @@ def probe_deye(
         return ProbeResult(service="deye", status="failed", headline=str(exc))
 
     details = [
-        f"Device: {_mask_identifier(status.device_sn)} | "
+        f"Mode: {mode_label} | Device: {_mask_identifier(status.device_sn)} | "
         f"Battery power: {status.battery_power_w:.0f}W | TOU enabled: {status.tou_enabled}"
     ]
     for slot in status.tou_slots:
@@ -388,6 +407,7 @@ def run_probes(
     target: ProbeTarget = "all",
     transports: Mapping[ServiceName, httpx.BaseTransport] | None = None,
     reference_time: datetime | None = None,
+    modbus_factory: Callable[..., Any] | None = None,
 ) -> list[ProbeResult]:
     """Execute read-only probes for the requested service(s)."""
     selected: Sequence[ServiceName] = ALL_SERVICES if target == "all" else (target,)
@@ -405,7 +425,9 @@ def run_probes(
                 probe_solar(settings, transport=svc_transport, reference_time=reference_time)
             )
         elif service == "deye":
-            results.append(probe_deye(settings, transport=svc_transport))
+            results.append(
+                probe_deye(settings, transport=svc_transport, modbus_factory=modbus_factory)
+            )
         elif service == "cardata":
             results.append(probe_cardata(settings, transport=svc_transport))
 

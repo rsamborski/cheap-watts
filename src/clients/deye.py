@@ -1,15 +1,17 @@
-"""Deye Cloud / Solarman Open API read client behind an InverterClient protocol."""
+"""Deye inverter clients (Local Solarman V5 TCP & Deye Cloud API) behind InverterClient."""
 
 from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any, Protocol, runtime_checkable
 
 import httpx
 from pydantic import SecretStr
+from pysolarmanv5 import NoSocketAvailableError, PySolarmanV5, V5FrameError
 
 from src.clients.errors import (
     ApiClientError,
@@ -414,3 +416,211 @@ class DeyeCloudClient:
 
         slots.sort(key=lambda slot: slot.slot_index)
         return tou_enabled, slots
+
+
+# Deye 3-Phase Low-Voltage Hybrid (SUN-5/6/8/10/12K-SG04LP3-EU) Modbus Holding Registers
+_REG_TOU_BLOCK_START = 146
+_REG_TOU_BLOCK_LEN = 32  # 146..177 inclusive
+_REG_TOU_ENABLE = 146  # bit 0 = global TOU enable, bits 1..7 = Mon..Sun
+_REG_TOU_TIME_1 = 148  # 148..153 = Slot 1..6 start HHMM (e.g. 400 -> "04:00")
+_REG_TOU_SOC_1 = 166  # 166..171 = Slot 1..6 target battery SoC (%)
+_REG_TOU_CHARGE_1 = 172  # 172..177 = Slot 1..6 charge flags (bit 0 = grid charge)
+
+_REG_TELEMETRY_START = 588
+_REG_TELEMETRY_LEN = 86  # 588..673 inclusive
+_REG_BATTERY_SOC = 588
+_REG_BATTERY_POWER = 590  # signed int16 (W)
+_REG_TOTAL_GRID_POWER = 625  # signed int16 (W)
+_REG_TOTAL_LOAD_POWER = 653  # signed int16 (W)
+_REG_PV1_POWER = 672  # uint16 (W)
+_REG_PV2_POWER = 673  # uint16 (W)
+
+
+def _to_int16(raw: int) -> int:
+    """Interpret an unsigned 16-bit Modbus register value as signed two's-complement int16."""
+    masked = int(raw) & 0xFFFF
+    return masked - 0x10000 if masked >= 0x8000 else masked
+
+
+def _decode_modbus_hhmm(raw: int, slot_index: int) -> str:
+    """Decode Deye Modbus HHMM decimal integer (e.g. `430` -> `'04:30'`) into `HH:MM`."""
+    val = int(raw)
+    if val == 2400:
+        return "00:00"
+    hh, mm = divmod(val, 100)
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        raise PayloadParseError(
+            f"Invalid Deye Modbus HHMM register value for TOU slot #{slot_index}: {raw!r}"
+        )
+    return f"{hh:02d}:{mm:02d}"
+
+
+class SolarmanV5Client:
+    """Local LAN Solarman V5 Modbus-over-TCP client (`:8899`) implementing `InverterClient`."""
+
+    def __init__(
+        self,
+        host: str,
+        logger_serial: int | str,
+        port: int = 8899,
+        slave_id: int = 1,
+        device_sn: str | None = None,
+        timeout: float = 15.0,
+        modbus_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        cleaned_host = host.strip()
+        if not cleaned_host:
+            raise ValueError("host must be non-empty")
+        if not 1 <= port <= 65535:
+            raise ValueError("port must be in 1..65535")
+        try:
+            parsed_serial = int(str(logger_serial).strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"logger_serial must be a numeric SN, got {logger_serial!r}") from exc
+        if parsed_serial <= 0:
+            raise ValueError("logger_serial must be a positive integer")
+
+        self._host = cleaned_host
+        self._serial = parsed_serial
+        self._port = port
+        self._slave_id = slave_id
+        self._device_sn = (
+            device_sn.strip() if device_sn and device_sn.strip() else str(parsed_serial)
+        )
+        self._timeout = max(1, int(round(timeout)))
+        self._modbus_factory = modbus_factory or PySolarmanV5
+        self._modbus: Any | None = None
+
+    def close(self) -> None:
+        """Close the underlying Solarman V5 TCP socket if open."""
+        if self._modbus is not None:
+            try:
+                self._modbus.disconnect()
+            except Exception:
+                logger.debug("Ignored error while disconnecting Solarman V5 socket", exc_info=True)
+            finally:
+                self._modbus = None
+
+    def __enter__(self) -> SolarmanV5Client:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def _ensure_connected(self) -> Any:
+        if self._modbus is None:
+            self._modbus = self._modbus_factory(
+                self._host,
+                self._serial,
+                port=self._port,
+                mb_slave_id=self._slave_id,
+                socket_timeout=self._timeout,
+                auto_reconnect=True,
+                logger=logging.getLogger("pstryk_pilot.clients.solarman"),
+            )
+        return self._modbus
+
+    def get_status(self) -> InverterStatus:
+        """Read live telemetry and 6-slot TOU schedule directly from the local Wi-Fi stick."""
+        try:
+            conn = self._ensure_connected()
+            telemetry_regs: list[int] = conn.read_holding_registers(
+                register_addr=_REG_TELEMETRY_START,
+                quantity=_REG_TELEMETRY_LEN,
+            )
+            tou_regs: list[int] = conn.read_holding_registers(
+                register_addr=_REG_TOU_BLOCK_START,
+                quantity=_REG_TOU_BLOCK_LEN,
+            )
+        except (NoSocketAvailableError, V5FrameError, OSError, TimeoutError) as exc:
+            self.close()
+            raise ApiClientError(
+                f"Deye local Solarman V5 error ({self._host}:{self._port}): {exc}"
+            ) from exc
+        except Exception as exc:
+            if isinstance(exc, ApiClientError):
+                raise
+            self.close()
+            raise ApiClientError(
+                f"Deye local Modbus error ({self._host}:{self._port}): {exc}"
+            ) from exc
+
+        if len(telemetry_regs) < _REG_TELEMETRY_LEN:
+            raise PayloadParseError(
+                f"Expected {_REG_TELEMETRY_LEN} telemetry registers, got {len(telemetry_regs)}"
+            )
+        if len(tou_regs) < _REG_TOU_BLOCK_LEN:
+            raise PayloadParseError(
+                f"Expected {_REG_TOU_BLOCK_LEN} TOU registers, got {len(tou_regs)}"
+            )
+
+        def tel(addr: int) -> int:
+            return int(telemetry_regs[addr - _REG_TELEMETRY_START])
+
+        def tou(addr: int) -> int:
+            return int(tou_regs[addr - _REG_TOU_BLOCK_START])
+
+        battery_soc = tel(_REG_BATTERY_SOC)
+        if not 0 <= battery_soc <= 100:
+            raise PayloadParseError(f"Deye Modbus battery SoC out of [0, 100] range: {battery_soc}")
+
+        battery_power_w = float(_to_int16(tel(_REG_BATTERY_POWER)))
+        grid_power_w = float(_to_int16(tel(_REG_TOTAL_GRID_POWER)))
+        load_power_w = max(0.0, float(_to_int16(tel(_REG_TOTAL_LOAD_POWER))))
+        pv1_w = max(0, tel(_REG_PV1_POWER) & 0xFFFF)
+        pv2_w = max(0, tel(_REG_PV2_POWER) & 0xFFFF)
+        pv_power_w = float(pv1_w + pv2_w)
+
+        tou_enabled = bool(tou(_REG_TOU_ENABLE) & 0x01)
+        start_times = [
+            _decode_modbus_hhmm(tou(_REG_TOU_TIME_1 + idx), slot_index=idx + 1) for idx in range(6)
+        ]
+
+        slots: list[TouSlot] = []
+        for idx in range(6):
+            slot_num = idx + 1
+            raw_soc = tou(_REG_TOU_SOC_1 + idx)
+            if not 0 <= raw_soc <= 100:
+                raise PayloadParseError(
+                    f"Deye Modbus TOU slot #{slot_num} SoC out of [0, 100] range: {raw_soc}"
+                )
+            charge_flags = tou(_REG_TOU_CHARGE_1 + idx)
+            slots.append(
+                TouSlot(
+                    slot_index=slot_num,
+                    start_time=start_times[idx],
+                    end_time=start_times[(idx + 1) % 6],
+                    target_soc=raw_soc,
+                    grid_charge=bool(charge_flags & 0x01),
+                    sell=False,
+                )
+            )
+
+        status = InverterStatus(
+            device_sn=self._device_sn,
+            battery_soc=battery_soc,
+            pv_power_w=pv_power_w,
+            battery_power_w=battery_power_w,
+            grid_power_w=grid_power_w,
+            load_power_w=load_power_w,
+            tou_enabled=tou_enabled,
+            tou_slots=slots,
+            fetched_at=datetime.now(tz=UTC),
+        )
+        logger.info(
+            "Fetched Deye inverter status over local Solarman V5",
+            extra={
+                "event": "deye_local_status_fetched",
+                "host": self._host,
+                "port": self._port,
+                "battery_soc": status.battery_soc,
+                "pv_power_w": status.pv_power_w,
+                "tou_enabled": status.tou_enabled,
+            },
+        )
+        return status

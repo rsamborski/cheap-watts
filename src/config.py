@@ -126,11 +126,30 @@ class Settings(BaseSettings):
 
     def missing_live_settings(self) -> list[str]:
         """Return names of required settings that are not yet configured for live execution."""
-        required_checks: list[tuple[str, Any]] = [
-            ("PSTRYK_API_KEY", self.pstryk_api_key),
-            ("DEYE_APP_ID", self.deye_app_id),
-            ("DEYE_APP_SECRET", self.deye_app_secret),
-            ("DEYE_DEVICE_SN", self.deye_device_sn),
+        missing: list[str] = []
+        if self.pstryk_api_key is None:
+            missing.append("PSTRYK_API_KEY")
+
+        has_local_deye = bool(self.deye_modbus_host and self.deye_logger_serial)
+        has_cloud_deye = bool(
+            self.deye_device_sn
+            and (
+                self.deye_access_token is not None
+                or (
+                    self.deye_app_id
+                    and self.deye_app_secret is not None
+                    and self.deye_email
+                    and self.deye_password is not None
+                )
+            )
+        )
+        if not has_local_deye and not has_cloud_deye:
+            if not self.deye_modbus_host:
+                missing.append("DEYE_MODBUS_HOST")
+            if not self.deye_logger_serial:
+                missing.append("DEYE_LOGGER_SERIAL")
+
+        for env_name, val in (
             ("BMW_CARDATA_CLIENT_ID", self.bmw_cardata_client_id),
             ("MINI_CARDATA_CLIENT_ID", self.mini_cardata_client_id),
             ("SOLAR_LATITUDE", self.solar_latitude),
@@ -139,8 +158,10 @@ class Settings(BaseSettings):
             ("SMTP_HOST", self.smtp_host),
             ("SMTP_FROM_EMAIL", self.smtp_from_email),
             ("SMTP_TO_EMAIL", self.smtp_to_email),
-        ]
-        return [env_name for env_name, val in required_checks if val is None]
+        ):
+            if val is None:
+                missing.append(env_name)
+        return missing
 
 
 def load_settings(env_file: str | Path | None = ".env") -> Settings:

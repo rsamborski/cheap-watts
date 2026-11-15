@@ -19,7 +19,7 @@ Track progress across implementation phases. Update checkboxes as tasks are comp
 ## Phase 2: Read-Only API Connectors & Test Fixtures
 - [x] Define shared domain models (`src/models.py`: `PriceSlot`, `SolarHour`, `VehicleStatus`, `InverterStatus`, `ChargingPlan`).
 - [x] Implement **Pstryk API client** (`src/clients/pstryk.py`) for fetching today & next-day hourly tariffs.
-- [x] Implement **Deye Cloud / Solarman Open API read client** (`src/clients/deye.py`) behind an `InverterClient` protocol (battery SoC, PV power, current TOU slots).
+- [x] Implement **Deye inverter read clients** (`src/clients/deye.py`) behind an `InverterClient` protocol: **Local LAN Solarman V5 TCP (`:8899`)** (`SolarmanV5Client`) + Deye Cloud Open API (`DeyeCloudClient`) for battery SoC, PV/grid/load power, and 6 TOU slots.
 - [x] Implement **BMW CarData client** (`src/clients/cardata.py`) for reading BMW & MINI SoC, plug connection, and active charging status.
 - [x] Implement **Solar forecast client** (`src/clients/solar.py`) via Open-Meteo / Forecast.Solar.
 - [x] Capture anonymized JSON test fixtures in `tests/fixtures/` and write unit tests for response parsing.

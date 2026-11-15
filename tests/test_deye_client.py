@@ -13,8 +13,11 @@ from pydantic import SecretStr
 from src.clients.deye import (
     DeyeCloudClient,
     InverterClient,
+    SolarmanV5Client,
+    _decode_modbus_hhmm,
     _normalize_hhmm,
     _parse_bool_flag,
+    _to_int16,
 )
 from src.clients.errors import ApiClientError, AuthenticationError, PayloadParseError
 
@@ -268,3 +271,146 @@ def test_deye_helpers_and_malformed_payload_branches() -> None:
         DeyeCloudClient._parse_tou_config(
             {"timeUseSettingItems": [{"time": "00:00-04:00", "val": "bad"}]}
         )
+
+
+def _sample_modbus_blocks() -> tuple[list[int], list[int]]:
+    telemetry = [0] * 86
+    telemetry[588 - 588] = 74  # Battery SOC 74%
+    telemetry[590 - 588] = (-850) & 0xFFFF  # Charging at -850W (signed int16)
+    telemetry[625 - 588] = (-320) & 0xFFFF  # Exporting -320W to grid
+    telemetry[653 - 588] = 1410  # Home load 1410W
+    telemetry[672 - 588] = 1100  # PV1 1100W
+    telemetry[673 - 588] = 950  # PV2 950W -> total 2050W
+
+    tou = [0] * 32
+    tou[146 - 146] = 0xFF  # TOU enabled + all 7 days
+    for idx, hhmm in enumerate((0, 400, 800, 1200, 1600, 2030)):
+        tou[(148 - 146) + idx] = hhmm
+    for idx, soc in enumerate((95, 30, 30, 50, 30, 80)):
+        tou[(166 - 146) + idx] = soc
+    for idx, charge in enumerate((1, 0, 0, 1, 0, 0)):
+        tou[(172 - 146) + idx] = charge
+    return telemetry, tou
+
+
+def test_solarman_v5_client_reads_telemetry_and_tou_registers() -> None:
+    telemetry, tou = _sample_modbus_blocks()
+    disconnected = False
+
+    class FakeModbus:
+        def __init__(self, address: str, serial: int, **kwargs: object) -> None:
+            assert address == "192.168.1.50"
+            assert serial == 2700012345
+            assert kwargs["port"] == 8899
+
+        def read_holding_registers(self, register_addr: int, quantity: int) -> list[int]:
+            if register_addr == 588 and quantity == 86:
+                return list(telemetry)
+            if register_addr == 146 and quantity == 32:
+                return list(tou)
+            raise AssertionError(f"Unexpected read: {register_addr} x {quantity}")
+
+        def disconnect(self) -> None:
+            nonlocal disconnected
+            disconnected = True
+
+    with SolarmanV5Client(
+        host="192.168.1.50",
+        logger_serial="2700012345",
+        device_sn="DEYE0000EXAMPLE1",
+        modbus_factory=FakeModbus,
+    ) as client:
+        assert isinstance(client, InverterClient)
+        status = client.get_status()
+
+    assert disconnected is True
+    assert status.device_sn == "DEYE0000EXAMPLE1"
+    assert status.battery_soc == 74
+    assert status.battery_power_w == pytest.approx(-850.0)
+    assert status.grid_power_w == pytest.approx(-320.0)
+    assert status.load_power_w == pytest.approx(1410.0)
+    assert status.pv_power_w == pytest.approx(2050.0)
+    assert status.tou_enabled is True
+    assert len(status.tou_slots) == 6
+    assert status.tou_slots[0].start_time == "00:00"
+    assert status.tou_slots[0].end_time == "04:00"
+    assert status.tou_slots[0].target_soc == 95
+    assert status.tou_slots[0].grid_charge is True
+    # Slot 6 wraps end_time back to Slot 1 start_time ("00:00")
+    assert status.tou_slots[5].start_time == "20:30"
+    assert status.tou_slots[5].end_time == "00:00"
+    assert status.tou_slots[5].grid_charge is False
+
+
+def test_solarman_v5_client_validation_and_error_handling() -> None:
+    assert _to_int16(0xFFFF) == -1
+    assert _to_int16(500) == 500
+    assert _decode_modbus_hhmm(2400, 1) == "00:00"
+    with pytest.raises(PayloadParseError, match="HHMM"):
+        _decode_modbus_hhmm(2599, 1)
+
+    with pytest.raises(ValueError, match="host"):
+        SolarmanV5Client(host="  ", logger_serial=123)
+    with pytest.raises(ValueError, match="port"):
+        SolarmanV5Client(host="192.168.1.50", logger_serial=123, port=70000)
+    with pytest.raises(ValueError, match="numeric"):
+        SolarmanV5Client(host="192.168.1.50", logger_serial="not-a-number")
+    with pytest.raises(ValueError, match="positive"):
+        SolarmanV5Client(host="192.168.1.50", logger_serial=0)
+
+    class BrokenSocketModbus:
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            pass
+
+        def read_holding_registers(self, **_kw: object) -> list[int]:
+            raise OSError("timed out")
+
+        def disconnect(self) -> None:
+            raise RuntimeError("already closed")
+
+    with (
+        SolarmanV5Client(
+            host="192.168.1.50",
+            logger_serial=2700012345,
+            modbus_factory=BrokenSocketModbus,
+        ) as broken_client,
+        pytest.raises(ApiClientError, match="Solarman V5 error"),
+    ):
+        broken_client.get_status()
+
+    # Short register lists and out-of-range SoC values raise PayloadParseError
+    telemetry, tou = _sample_modbus_blocks()
+
+    for bad_tel, bad_tou in (
+        (telemetry[:10], tou),
+        (telemetry, tou[:5]),
+        ([150, *telemetry[1:]], tou),
+        (telemetry, [*tou[:20], 150, *tou[21:]]),
+    ):
+
+        class BadPayloadModbus:
+            def __init__(
+                self,
+                *_a: object,
+                _t: list[int] = bad_tel,
+                _u: list[int] = bad_tou,
+                **_kw: object,
+            ) -> None:
+                self._t = _t
+                self._u = _u
+
+            def read_holding_registers(self, register_addr: int, quantity: int) -> list[int]:
+                return self._t if register_addr == 588 else self._u
+
+            def disconnect(self) -> None:
+                pass
+
+        with (
+            SolarmanV5Client(
+                host="192.168.1.50",
+                logger_serial=2700012345,
+                modbus_factory=BadPayloadModbus,
+            ) as bad_client,
+            pytest.raises(PayloadParseError),
+        ):
+            bad_client.get_status()

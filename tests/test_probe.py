@@ -230,3 +230,40 @@ def test_probe_solar_dual_string_uses_fallback_tilt_and_reports_total_kwp() -> N
     assert results[0].status == "ok"
     assert "9.0 kWp (2 strings)" in results[0].headline
     assert captured_params == [("30.0", "-90.0"), ("30.0", "90.0")]
+
+
+def test_probe_deye_prefers_local_solarman_v5_when_configured() -> None:
+    telemetry = [0] * 86
+    telemetry[0] = 68  # reg 588 SoC
+    telemetry[84] = 1500  # reg 672 PV1
+    tou = [0] * 32
+    tou[0] = 1  # TOU enabled
+    for idx, hhmm in enumerate((0, 400, 800, 1200, 1600, 2000)):
+        tou[2 + idx] = hhmm
+        tou[20 + idx] = 90 if idx == 0 else 25
+        tou[26 + idx] = 1 if idx == 0 else 0
+
+    class FakeLocalModbus:
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            pass
+
+        def read_holding_registers(self, register_addr: int, quantity: int) -> list[int]:
+            return telemetry if register_addr == 588 else tou
+
+        def disconnect(self) -> None:
+            pass
+
+    settings = Settings(
+        _env_file=None,
+        deye_modbus_host="192.168.1.50",
+        deye_modbus_port=8899,
+        deye_logger_serial="2700012345",
+    )
+    assert "DEYE_MODBUS_HOST" not in settings.missing_live_settings()
+    assert "DEYE_LOGGER_SERIAL" not in settings.missing_live_settings()
+
+    results = run_probes(settings, target="deye", modbus_factory=FakeLocalModbus)
+    assert len(results) == 1
+    assert results[0].status == "ok"
+    assert "Battery SoC 68%" in results[0].headline
+    assert any("Mode: local-lan (192.168.1.50:8899)" in d for d in results[0].details)

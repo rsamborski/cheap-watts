@@ -15,9 +15,9 @@ During initial design discovery, several hardware and operational trade-offs had
 - **Decision:** Build as a headless CLI application in Python 3.12+ managed with `uv`, invoked every 15–30 minutes via `cron` on a Linux/macOS/Docker host.
 - **Rationale:** Zero web UI overhead; `cron` naturally handles both periodic EV/PV conflict checks (every 15–30 min) and daily Day-Ahead schedule planning once Pstryk publishes next-day tariffs.
 
-### 2. Deye Communication via Cloud Open API (Behind Protocol Interface)
-- **Decision:** Use **Deye Cloud / Solarman Open API** for reading inverter telemetry (battery SoC, PV generation, current TOU slots) and writing Time-of-Use (TOU) charging schedules, wrapped behind an abstract `InverterClient` protocol.
-- **Rationale:** Requires zero additional RS-485/Ethernet cabling or LAN logger configuration to launch v1, while preserving a clean seam to add local Solarman V5 TCP (`:8899`) or Modbus RTU later.
+### 2. Deye Communication via Local Solarman V5 TCP (`:8899`) + Cloud Fallback (Behind Protocol Interface)
+- **Decision:** Use **Local LAN Solarman V5 Modbus-over-TCP (`:8899` via `pysolarmanv5`)** as the primary `InverterClient` implementation (`SolarmanV5Client`) talking directly to the Deye `SUN-10K-SG04LP3-EU` Wi-Fi stick logger, while keeping **Deye Cloud Open API** (`DeyeCloudClient`) behind the same `InverterClient` protocol as an optional remote fallback.
+- **Rationale:** Live Phase 2 validation showed the inverter is bound to the **SOLARMAN Smart** app rather than Deye Cloud (where Solarman's Cloud API lacks self-service keys and public TOU write endpoints). Local Solarman V5 TCP (`:8899`) works on the home LAN with zero cloud API keys, zero rate limits, full real-time telemetry (`588..673`), and direct access to all 6 TOU schedule registers (`146..177`) while leaving the SOLARMAN Smart mobile app untouched.
 
 ### 3. Read-Only EV Telemetry + Email Recommendations + Strict Non-Overlap
 - **Decision:** Read SoC and charging state from **BMW CarData API**. Do not integrate smart Wallbox hardware in v1; instead:
