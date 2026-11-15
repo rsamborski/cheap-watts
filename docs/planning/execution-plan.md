@@ -11,8 +11,8 @@ An automated, headless Home Energy Management System (HEMS) written in Python (`
 | **Stack & Runtime** | Python 3.12+ managed with `uv` (`pyproject.toml`, `uv.lock`). No UI; CLI entrypoint triggered by `cron` on Linux/macOS/Docker every 15–30 minutes. |
 | **Deye Control** | **Deye Cloud / Solarman Open API** behind a clean `InverterClient` interface (allowing future local Modbus/Solarman V5 drop-in). |
 | **Vehicle Telemetry** | **BMW CarData API (read-only)** for BMW (trigger `<= 20%` SoC) and MINI (trigger `<= 40%` SoC). |
-| **EV Charging Coordination** | Manual EV charging in v1 via email alerts. **EV priority & strict non-overlap:** if CarData reports an EV is already actively charging, skip EV threshold checks and block active hours from Deye grid-charging. Otherwise, if an EV is `<= threshold`, EV gets the best window (sun slow-charge in summer, cheapest hours in low-sun) and Deye grid-charging uses non-overlapping hours. |
-| **Deye Battery Strategy** | **Grid-charge only when solar is insufficient:** if PV forecast is strong enough to charge the battery, disable Deye TOU grid-charging (`OFF`) so the battery charges purely from PV. Only when forecasted PV is insufficient, dynamically size needed kWh (`target_soc - current_soc - expected_pv`) and enable grid-charging in the cheapest non-overlapping hours. |
+| **EV Charging Coordination** | Manual EV charging in v1 via email alerts. **EV priority & post-EV battery ordering:** if CarData reports an EV is already actively charging, skip EV threshold checks and block active hours from Deye grid-charging. Otherwise, if an EV is `<= threshold`, EV gets the best window (sun slow-charge in summer, cheapest hours in low-sun). Home battery grid-charging is scheduled **after** EV charging (never before, because EV charging will discharge the battery). |
+| **Deye Battery Strategy** | **Grid-charge only when solar is insufficient:** if PV forecast is strong enough to charge the battery, disable Deye TOU grid-charging (`OFF`) so the battery charges purely from PV. Only when forecasted PV is insufficient, size needed kWh to fulfill configured **typical daily usage** (`TYPICAL_DAILY_USAGE_KWH` minus current battery energy and expected PV) and enable grid-charging **only 1–2 times per day** in the cheapest hours **after** EV charging windows. |
 | **Summer / Sun Optimization** | Automatic via **Open-Meteo / Forecast.Solar** (lat/lon + kWp) + real-time Deye PV telemetry. Strong PV turns **OFF** Deye grid-charging (solar charges battery automatically) and recommends daytime **slow-charge (6–10A)** EV windows for self-consumption. |
 | **Notifications** | Standard **SMTP** sent **whenever actionable changes occur** — i.e., any Deye TOU schedule change (including blocking grid-charge hours when an EV starts charging or turning grid-charge OFF for sunny weather) or a new EV charge recommendation — plus critical errors. No email if no changes occur. |
 | **Dry-Run Mode** | `--dry-run` (or `DRY_RUN=true`): runs all read APIs and decision logic, logs planned Deye mutations, **skips all Deye write calls**, and **sends change/alert emails prefixed with `[DRY-RUN]`** (no email if no changes are expected). |
@@ -81,7 +81,7 @@ flowchart TD
     I --> S
 
     S -- "Yes (Sunny)" --> S1["Target Deye TOU: grid-charge OFF (PV charges battery automatically)"]
-    S -- "No (Low sun)" --> S2["Size needed kWh & pick cheapest Pstryk hours (excluding blocked/reserved EV hours)"]
+    S -- "No (Low sun)" --> S2["Size needed kWh for typical daily usage & pick 1-2 cheapest windows AFTER EV charging"]
 
     %% Step 3: Change detection, Deye write, and change-driven email
     S1 --> L{"Did Deye TOU schedule change?"}
@@ -118,8 +118,8 @@ flowchart TD
 - Implement `planner.py` with pure, deterministic functions:
   - EV threshold detection (`BMW <= 20%`, `MINI <= 40%`) & active-charging detection.
   - Summer/sun slow-charge window selection vs. cheapest-tariff window selection.
-  - Dynamic Deye kWh calculation and non-overlapping cheapest-hour selection mapped to Deye's 6 TOU slots.
-- Write thorough unit tests in `tests/test_planner.py` covering winter/summer, EV active charging, dry-run, and edge cases (e.g., missing tomorrow prices before 14:00).
+  - Dynamic Deye kWh calculation capped to configured typical daily usage (`TYPICAL_DAILY_USAGE_KWH` minus current energy and expected PV), consolidated into **1–2 grid-charging windows per day** scheduled **after** EV charging windows, mapped to Deye's 6 TOU slots.
+- Write thorough unit tests in `tests/test_planner.py` covering winter/summer, EV active charging, post-EV grid-charge ordering, 1–2x/day window limits, dry-run, and edge cases (e.g., missing tomorrow prices before 14:00).
 
 ### Phase 4: Deye Write Adapter & SMTP Notifications
 - Implement Deye TOU schedule write call with idempotency diffing (only write when slots actually change).
@@ -129,3 +129,20 @@ flowchart TD
 - Run in `--dry-run` mode via `cron` for several days, reviewing logs and `[DRY-RUN]` emails.
 - Enable live Deye writes once schedules match expectations.
 - Provide `Dockerfile` / `crontab` example in `README.md`.
+
+---
+
+## 5. Future Improvements (Post-v1)
+
+The following features are planned for implementation after the core v1 functionality is complete, validated, and running reliably:
+
+1. **Vacation Mode:**
+   - Support configuring multiple `from`/`to` date ranges via environment variables (e.g., `VACATION_RANGES`).
+   - When `pstryk-pilot` detects the current date falls within an active vacation period:
+     - Suppress all EV charging notifications.
+     - Reduce grid battery charging to the minimum required level using a configurable expected battery SoC target (e.g., `VACATION_TARGET_SOC_PCT`).
+
+2. **Historical Usage Analysis (Daily Cron Mode):**
+   - Add a separate CLI mode/subcommand (e.g., `pstryk-pilot analyze-usage`) intended to run once daily via `cron`.
+   - Fetch historical daily/hourly electrical consumption from the Deye Cloud API (subject to API data availability) and analyze usage patterns.
+   - Feed the learned daily usage patterns (plus a configurable 10–20% safety buffer) into the grid-charging planner, replacing or refining the static `TYPICAL_DAILY_USAGE_KWH` setting so the battery charges only what is needed to cover typical daily consumption.
