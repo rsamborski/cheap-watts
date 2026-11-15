@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from src import __version__
-from src.clients.cardata import CarDataClient, CarDataVehicleConfig
+from src.clients.cardata import CarDataClient, CarDataTokenStore, CarDataVehicleConfig
 from src.clients.deye import DeyeCloudClient, SolarmanV5Client
 from src.clients.errors import ApiClientError
 from src.clients.pstryk import PstrykClient
@@ -56,6 +56,7 @@ def build_cardata_vehicles(settings: Settings) -> list[CarDataVehicleConfig]:
             display_name="BMW",
             client_id=settings.bmw_cardata_client_id,
             vin=settings.bmw_vin,
+            container_id=settings.bmw_cardata_container_id,
             access_token=settings.bmw_cardata_access_token,
             refresh_token=settings.bmw_cardata_refresh_token,
         ),
@@ -64,6 +65,7 @@ def build_cardata_vehicles(settings: Settings) -> list[CarDataVehicleConfig]:
             display_name="MINI",
             client_id=settings.mini_cardata_client_id,
             vin=settings.mini_vin,
+            container_id=settings.mini_cardata_container_id,
             access_token=settings.mini_cardata_access_token,
             refresh_token=settings.mini_cardata_refresh_token,
         ),
@@ -326,16 +328,24 @@ def probe_cardata(
     transport: httpx.BaseTransport | None = None,
 ) -> ProbeResult:
     """Probe BMW and MINI EV telemetry via BMW CarData (read-only)."""
+    token_store = CarDataTokenStore(settings.cardata_tokens_file)
     vehicles = build_cardata_vehicles(settings)
-    configured = [v for v in vehicles if v.is_configured]
+    configured = [v for v in vehicles if v.has_credentials(token_store)]
     if not configured:
+        has_client_id = any(bool(v.client_id) for v in vehicles)
+        headline = (
+            "Client ID configured, awaiting browser authorization "
+            "(run: uv run pstryk-pilot cardata-auth)"
+            if has_client_id
+            else (
+                "Not configured (set BMW_CARDATA_CLIENT_ID / MINI_CARDATA_CLIENT_ID in .env, "
+                "then run uv run pstryk-pilot cardata-auth)"
+            )
+        )
         return ProbeResult(
             service="cardata",
             status="skipped",
-            headline=(
-                "Not configured (set *_CARDATA_ACCESS_TOKEN or "
-                "*_CARDATA_CLIENT_ID + *_CARDATA_REFRESH_TOKEN in .env)"
-            ),
+            headline=headline,
         )
 
     details: list[str] = []
@@ -345,10 +355,12 @@ def probe_cardata(
     with CarDataClient(
         base_url=settings.cardata_base_url,
         token_url=settings.cardata_token_url,
+        device_code_url=settings.cardata_device_code_url,
         transport=transport,
+        token_store=token_store,
     ) as client:
         for vehicle in vehicles:
-            if not vehicle.is_configured:
+            if not vehicle.has_credentials(token_store):
                 details.append(f"{vehicle.display_name}: skipped (not configured)")
                 continue
 

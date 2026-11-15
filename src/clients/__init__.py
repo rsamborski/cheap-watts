@@ -1,6 +1,11 @@
 """External API clients (Pstryk, Deye Cloud, BMW CarData, Solar forecast)."""
 
-from src.clients.cardata import CarDataClient, CarDataVehicleConfig
+from src.clients.cardata import (
+    CarDataClient,
+    CarDataTokenRecord,
+    CarDataTokenStore,
+    CarDataVehicleConfig,
+)
 from src.clients.deye import DeyeCloudClient, InverterClient, SolarmanV5Client
 from src.clients.errors import (
     ApiClientError,
@@ -15,6 +20,8 @@ __all__ = [
     "ApiClientError",
     "AuthenticationError",
     "CarDataClient",
+    "CarDataTokenRecord",
+    "CarDataTokenStore",
     "CarDataVehicleConfig",
     "DeyeCloudClient",
     "InverterClient",

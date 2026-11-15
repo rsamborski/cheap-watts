@@ -1,34 +1,69 @@
-"""Read-only BMW CarData API client for BMW and MINI EV telemetry."""
+"""Read-only BMW CarData API client and OAuth 2.0 Device Code flow for BMW & MINI."""
 
 from __future__ import annotations
 
+import base64
+import contextlib
+import hashlib
+import json
 import logging
-from collections.abc import Sequence
+import os
+import secrets
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import TracebackType
 from typing import Any, Literal
 
 import httpx
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr
 
 from src.clients.errors import (
     ApiClientError,
     AuthenticationError,
     PayloadParseError,
+    RateLimitError,
     parse_json_response,
 )
 from src.models import VehicleStatus
 
 logger = logging.getLogger("pstryk_pilot.clients.cardata")
 
-_MAPPINGS_PATH = "/v1/customers/vehicles/mappings"
-_TELEMATIC_PATH_TEMPLATE = "/v1/customers/vehicles/{vin}/telematicData"
+_MAPPINGS_PATH = "/customers/vehicles/mappings"
+_CONTAINERS_PATH = "/customers/containers"
+_TELEMATIC_PATH_TEMPLATE = "/customers/vehicles/{vin}/telematicData"
+
+_DEVICE_CODE_SCOPE = "authenticate_user openid cardata:api:read"
+_DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+
+_CONTAINER_NAME = "pstryk-pilot"
+_CONTAINER_PURPOSE = "EV battery SoC and charging status for home energy optimization"
+_DEFAULT_CONTAINER_DESCRIPTORS: tuple[str, ...] = (
+    "vehicle.drivetrain.batteryManagement.header",
+    "vehicle.drivetrain.electricEngine.charging.level",
+    "vehicle.powertrain.electric.battery.stateOfCharge.target",
+    "vehicle.drivetrain.electricEngine.charging.status",
+    "vehicle.drivetrain.electricEngine.charging.timeRemaining",
+    "vehicle.body.chargingPort.status",
+)
+_CORE_CONTAINER_DESCRIPTORS: tuple[str, ...] = (
+    "vehicle.drivetrain.batteryManagement.header",
+    "vehicle.drivetrain.electricEngine.charging.status",
+    "vehicle.body.chargingPort.status",
+)
+
+_BRAND_VIN_PREFIXES: dict[str, tuple[str, ...]] = {
+    "bmw": ("WBA", "WBS", "WBY", "WBX", "5UX", "5YM", "3MW"),
+    "mini": ("WMW",),
+}
 
 _SOC_KEYS = (
     "vehicle.powertrain.electric.battery.stateOfCharge.displayed",
     "vehicle.powertrain.electric.battery.stateOfCharge",
     "vehicle.drivetrain.batteryManagement.header",
+    "vehicle.drivetrain.electricEngine.charging.level",
     "soc",
 )
 _TARGET_SOC_KEYS = (
@@ -69,6 +104,115 @@ _CONNECTED_PLUG_VALUES = frozenset(
 )
 
 
+def generate_pkce_pair() -> tuple[str, str]:
+    """Generate an RFC 7636 PKCE (code_verifier, S256 code_challenge) pair."""
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
+@dataclass(frozen=True)
+class DeviceCodeChallenge:
+    """OAuth 2.0 Device Authorization response paired with its PKCE verifier."""
+
+    device_code: str
+    user_code: str
+    verification_uri: str
+    verification_uri_complete: str | None
+    expires_in: int
+    interval: int
+    code_verifier: str
+
+
+@dataclass(frozen=True)
+class OAuthTokenBundle:
+    """Tokens returned by BMW Group OAuth token endpoint."""
+
+    access_token: SecretStr
+    refresh_token: SecretStr | None
+    expires_in: int
+
+
+class CarDataTokenRecord(BaseModel):
+    """Persisted OAuth tokens and discovered CarData metadata for one vehicle."""
+
+    access_token: SecretStr
+    refresh_token: SecretStr | None = None
+    expires_at: datetime | None = None
+    client_id: str | None = None
+    vin: str | None = None
+    container_id: str | None = None
+    updated_at: datetime | None = None
+
+    def has_valid_access_token(
+        self,
+        now: datetime | None = None,
+        skew_seconds: int = 120,
+    ) -> bool:
+        """Return True if the cached access token is present and not near expiry."""
+        token = self.access_token.get_secret_value().strip()
+        if not token or self.expires_at is None:
+            return False
+        current = now or datetime.now(tz=UTC)
+        return (current + timedelta(seconds=skew_seconds)) < self.expires_at
+
+
+class CarDataTokenStore:
+    """Atomic JSON store (`0600`) for rotated BMW/MINI CarData OAuth tokens."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def load_all(self) -> dict[str, CarDataTokenRecord]:
+        """Load all stored vehicle token records from disk."""
+        if not self.path.exists():
+            return {}
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return {}
+        vehicles_raw = raw.get("vehicles", raw)
+        if not isinstance(vehicles_raw, dict):
+            return {}
+        records: dict[str, CarDataTokenRecord] = {}
+        for key, item in vehicles_raw.items():
+            if isinstance(item, dict) and item.get("access_token"):
+                records[str(key)] = CarDataTokenRecord.model_validate(item)
+        return records
+
+    def get(self, vehicle_key: str) -> CarDataTokenRecord | None:
+        """Return the stored token record for a vehicle key, if present."""
+        return self.load_all().get(vehicle_key)
+
+    def upsert(self, vehicle_key: str, record: CarDataTokenRecord) -> None:
+        """Atomically insert or update a single vehicle's token record with mode 0600."""
+        records = self.load_all()
+        records[vehicle_key] = record
+        self._save_all(records)
+
+    def _save_all(self, records: dict[str, CarDataTokenRecord]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
+        serialized_vehicles: dict[str, dict[str, Any]] = {}
+        for key, rec in records.items():
+            serialized_vehicles[key] = {
+                "access_token": rec.access_token.get_secret_value(),
+                "refresh_token": (
+                    rec.refresh_token.get_secret_value() if rec.refresh_token is not None else None
+                ),
+                "expires_at": rec.expires_at.isoformat() if rec.expires_at else None,
+                "client_id": rec.client_id,
+                "vin": rec.vin,
+                "container_id": rec.container_id,
+                "updated_at": rec.updated_at.isoformat() if rec.updated_at else None,
+            }
+        payload = json.dumps({"vehicles": serialized_vehicles}, indent=2)
+        tmp_path.write_text(f"{payload}\n", encoding="utf-8")
+        with contextlib.suppress(OSError):
+            os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, self.path)
+
+
 @dataclass(frozen=True)
 class CarDataVehicleConfig:
     """Per-vehicle credentials and metadata for BMW Group CarData polling."""
@@ -77,15 +221,29 @@ class CarDataVehicleConfig:
     display_name: str
     client_id: str | None = None
     vin: str | None = None
+    container_id: str | None = None
     access_token: SecretStr | None = None
     refresh_token: SecretStr | None = None
 
     @property
     def is_configured(self) -> bool:
-        """Return True if either a direct access token or OAuth refresh credentials exist."""
+        """Return True if inline access token or OAuth refresh credentials exist."""
         return self.access_token is not None or (
             bool(self.client_id) and self.refresh_token is not None
         )
+
+    def has_credentials(self, token_store: CarDataTokenStore | None = None) -> bool:
+        """Return True if inline credentials or matching stored OAuth tokens exist."""
+        if self.is_configured:
+            return True
+        if not self.client_id or token_store is None:
+            return False
+        record = token_store.get(self.vehicle_key)
+        if record is None:
+            return False
+        if record.client_id and record.client_id != self.client_id:
+            return False
+        return record.has_valid_access_token() or record.refresh_token is not None
 
 
 def _unwrap_descriptor_value(entry: Any) -> Any:
@@ -116,6 +274,28 @@ def _first_present(data: dict[str, Any], keys: tuple[str, ...]) -> Any:
     return None
 
 
+def _parse_json_any(response: httpx.Response, service: str) -> dict[str, Any] | list[Any]:
+    """Validate HTTP status code and decode a JSON object or array."""
+    status = response.status_code
+    if status in (401, 403):
+        raise AuthenticationError(f"{service} authentication failed (HTTP {status})")
+    if status == 429:
+        raise RateLimitError(f"{service} rate limit exceeded (HTTP 429)")
+    if status >= 400:
+        raise ApiClientError(f"{service} request failed with HTTP {status}")
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise PayloadParseError(f"{service} returned invalid JSON") from exc
+
+    if not isinstance(payload, (dict, list)):
+        raise PayloadParseError(
+            f"{service} expected JSON object or array, got {type(payload).__name__}"
+        )
+    return payload
+
+
 class CarDataClient:
     """Read-only BMW Group CarData client supporting BMW and MINI."""
 
@@ -123,11 +303,15 @@ class CarDataClient:
         self,
         base_url: str = "https://api-cardata.bmwgroup.com",
         token_url: str = "https://customer.bmwgroup.com/gcdm/oauth/token",
+        device_code_url: str = "https://customer.bmwgroup.com/gcdm/oauth/device/code",
         timeout: float = 15.0,
         transport: httpx.BaseTransport | None = None,
+        token_store: CarDataTokenStore | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._token_url = token_url
+        self._device_code_url = device_code_url
+        self._token_store = token_store
         self._token_cache: dict[str, str] = {}
         self._client = httpx.Client(
             timeout=timeout,
@@ -152,12 +336,189 @@ class CarDataClient:
     ) -> None:
         self.close()
 
-    def fetch_vehicle_status(self, config: CarDataVehicleConfig) -> VehicleStatus:
-        """Fetch SoC, plug status, and active charging flag for a single vehicle."""
-        token = self._resolve_access_token(config)
-        vin = config.vin.strip() if config.vin and config.vin.strip() else self._discover_vin(token)
+    def request_device_code(self, client_id: str) -> DeviceCodeChallenge:
+        """Initiate OAuth 2.0 Device Code + PKCE flow for BMW / MINI CarData."""
+        verifier, challenge = generate_pkce_pair()
+        try:
+            response = self._client.post(
+                self._device_code_url,
+                data={
+                    "client_id": client_id,
+                    "response_type": "device_code",
+                    "scope": _DEVICE_CODE_SCOPE,
+                    "code_challenge": challenge,
+                    "code_challenge_method": "S256",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+        except httpx.HTTPError as exc:
+            raise ApiClientError(
+                f"BMW CarData device code network error: {exc.__class__.__name__}"
+            ) from exc
 
-        url = f"{self._base_url}{_TELEMATIC_PATH_TEMPLATE.format(vin=vin)}"
+        payload = parse_json_response(response, service="BMW CarData OAuth device code")
+        device_code = payload.get("device_code")
+        user_code = payload.get("user_code")
+        verification_uri = payload.get("verification_uri")
+        if (
+            not isinstance(device_code, str)
+            or not device_code.strip()
+            or not isinstance(user_code, str)
+            or not user_code.strip()
+            or not isinstance(verification_uri, str)
+            or not verification_uri.strip()
+        ):
+            raise PayloadParseError(
+                "BMW CarData device code response missing required verification fields"
+            )
+
+        uri_complete = payload.get("verification_uri_complete")
+        expires_in = self._parse_optional_int(payload.get("expires_in"), 30, 86_400) or 900
+        interval = self._parse_optional_int(payload.get("interval"), 1, 120) or 5
+
+        return DeviceCodeChallenge(
+            device_code=device_code.strip(),
+            user_code=user_code.strip(),
+            verification_uri=verification_uri.strip(),
+            verification_uri_complete=(
+                uri_complete.strip()
+                if isinstance(uri_complete, str) and uri_complete.strip()
+                else None
+            ),
+            expires_in=expires_in,
+            interval=interval,
+            code_verifier=verifier,
+        )
+
+    def poll_device_token(
+        self,
+        client_id: str,
+        challenge: DeviceCodeChallenge,
+        sleep_fn: Callable[[float], None] = time.sleep,
+        monotonic_fn: Callable[[], float] = time.monotonic,
+    ) -> OAuthTokenBundle:
+        """Poll BMW Group token endpoint until browser authorization completes."""
+        started = monotonic_fn()
+        interval = float(challenge.interval)
+
+        while (monotonic_fn() - started) < challenge.expires_in:
+            sleep_fn(interval)
+            try:
+                response = self._client.post(
+                    self._token_url,
+                    data={
+                        "client_id": client_id,
+                        "device_code": challenge.device_code,
+                        "grant_type": _DEVICE_CODE_GRANT_TYPE,
+                        "code_verifier": challenge.code_verifier,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+            except httpx.HTTPError as exc:
+                raise ApiClientError(
+                    f"BMW CarData token polling network error: {exc.__class__.__name__}"
+                ) from exc
+
+            if response.status_code == 200:
+                payload = parse_json_response(response, service="BMW CarData OAuth token")
+                return self._parse_oauth_bundle(payload, context="device code flow")
+
+            if response.status_code in (400, 401, 403):
+                err_code = self._extract_oauth_error_code(response)
+                if err_code == "authorization_pending":
+                    continue
+                if err_code == "slow_down":
+                    interval += 5.0
+                    continue
+                if err_code == "expired_token":
+                    raise AuthenticationError("BMW CarData device code expired before approval")
+                if err_code == "access_denied":
+                    raise AuthenticationError("BMW CarData authorization was denied in browser")
+                raise AuthenticationError(
+                    f"BMW CarData OAuth authorization failed "
+                    f"(HTTP {response.status_code}, error={err_code or 'unknown'})"
+                )
+
+            parse_json_response(response, service="BMW CarData OAuth token")
+
+        raise AuthenticationError("Timed out waiting for BMW CarData browser approval")
+
+    def ensure_container(
+        self,
+        token: str,
+        descriptors: Sequence[str] = _DEFAULT_CONTAINER_DESCRIPTORS,
+    ) -> str:
+        """Reuse an active `pstryk-pilot` CarData container or create one."""
+        list_url = f"{self._base_url}{_CONTAINERS_PATH}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "x-version": "v1",
+        }
+        try:
+            list_resp = self._client.get(list_url, headers=headers)
+        except httpx.HTTPError as exc:
+            raise ApiClientError(
+                f"BMW CarData container lookup network error: {exc.__class__.__name__}"
+            ) from exc
+
+        parsed = _parse_json_any(list_resp, service="BMW CarData containers")
+        containers = parsed.get("containers", []) if isinstance(parsed, dict) else parsed
+        if isinstance(containers, list):
+            for item in containers:
+                if not isinstance(item, dict):
+                    continue
+                cid = item.get("containerId")
+                name = str(item.get("name", "")).strip()
+                state = str(item.get("state", "ACTIVE")).strip().upper()
+                if (
+                    name == _CONTAINER_NAME
+                    and state == "ACTIVE"
+                    and isinstance(cid, str)
+                    and cid.strip()
+                ):
+                    return cid.strip()
+
+        return self._create_container(token, descriptors=descriptors)
+
+    def _create_container(self, token: str, descriptors: Sequence[str]) -> str:
+        url = f"{self._base_url}{_CONTAINERS_PATH}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "x-version": "v1",
+            "Content-Type": "application/json",
+        }
+        body = {
+            "name": _CONTAINER_NAME,
+            "purpose": _CONTAINER_PURPOSE,
+            "technicalDescriptors": list(descriptors),
+        }
+        try:
+            response = self._client.post(url, headers=headers, json=body)
+        except httpx.HTTPError as exc:
+            raise ApiClientError(
+                f"BMW CarData container creation network error: {exc.__class__.__name__}"
+            ) from exc
+
+        if response.status_code == 400 and tuple(descriptors) != _CORE_CONTAINER_DESCRIPTORS:
+            logger.warning(
+                "Optional CarData descriptor rejected; retrying with core EV descriptors",
+                extra={"event": "cardata_container_fallback"},
+            )
+            return self._create_container(token, descriptors=_CORE_CONTAINER_DESCRIPTORS)
+
+        payload = parse_json_response(response, service="BMW CarData create container")
+        cid = payload.get("containerId")
+        if not isinstance(cid, str) or not cid.strip():
+            raise PayloadParseError("BMW CarData create container response missing 'containerId'")
+        return cid.strip()
+
+    def discover_vin(
+        self,
+        token: str,
+        vehicle_key: Literal["bmw", "mini"] | None = None,
+    ) -> str:
+        """Discover the mapped VIN, preferring brand-matching WMI prefixes when present."""
+        url = f"{self._base_url}{_MAPPINGS_PATH}"
         try:
             response = self._client.get(
                 url,
@@ -168,8 +529,89 @@ class CarDataClient:
             )
         except httpx.HTTPError as exc:
             raise ApiClientError(
-                f"BMW CarData network error for {config.vehicle_key}: {exc.__class__.__name__}"
+                f"BMW CarData VIN discovery network error: {exc.__class__.__name__}"
             ) from exc
+
+        parsed = _parse_json_any(response, service="BMW CarData VIN mappings")
+        raw_list = (
+            parsed.get("mappings") or parsed.get("vehicles") if isinstance(parsed, dict) else parsed
+        )
+        if not isinstance(raw_list, list) or not raw_list:
+            raise PayloadParseError("BMW CarData mappings response contained no vehicles")
+
+        valid_entries = [
+            item
+            for item in raw_list
+            if isinstance(item, dict) and isinstance(item.get("vin"), str) and item["vin"].strip()
+        ]
+        if not valid_entries:
+            raise PayloadParseError("BMW CarData mappings entry did not include a valid 'vin'")
+
+        if vehicle_key is not None:
+            prefixes = _BRAND_VIN_PREFIXES.get(vehicle_key, ())
+            brand_matches = [
+                item for item in valid_entries if item["vin"].strip().upper().startswith(prefixes)
+            ]
+            if brand_matches:
+                primary_brand = next(
+                    (
+                        item
+                        for item in brand_matches
+                        if str(item.get("mappingType", "")).upper() == "PRIMARY"
+                    ),
+                    brand_matches[0],
+                )
+                return str(primary_brand["vin"]).strip()
+
+        primary = next(
+            (
+                item
+                for item in valid_entries
+                if str(item.get("mappingType", "")).upper() == "PRIMARY"
+            ),
+            valid_entries[0],
+        )
+        return str(primary["vin"]).strip()
+
+    def fetch_vehicle_status(self, config: CarDataVehicleConfig) -> VehicleStatus:
+        """Fetch SoC, plug status, and active charging flag for a single vehicle."""
+        token = self._resolve_access_token(config)
+        stored = self._load_compatible_record(config)
+
+        vin = (
+            config.vin.strip()
+            if config.vin and config.vin.strip()
+            else (
+                stored.vin.strip()
+                if stored and stored.vin and stored.vin.strip()
+                else self.discover_vin(token, vehicle_key=config.vehicle_key)
+            )
+        )
+        container_id = (
+            config.container_id.strip()
+            if config.container_id and config.container_id.strip()
+            else (
+                stored.container_id.strip()
+                if stored and stored.container_id and stored.container_id.strip()
+                else None
+            )
+        )
+
+        response = self._get_telematic_response(
+            token=token,
+            vin=vin,
+            container_id=container_id,
+            vehicle_key=config.vehicle_key,
+        )
+        if response.status_code == 400 and container_id is None:
+            container_id = self.ensure_container(token)
+            self._persist_metadata_if_applicable(config, vin=vin, container_id=container_id)
+            response = self._get_telematic_response(
+                token=token,
+                vin=vin,
+                container_id=container_id,
+                vehicle_key=config.vehicle_key,
+            )
 
         payload = parse_json_response(response, service=f"BMW CarData ({config.display_name})")
         data = _extract_telematic_map(payload)
@@ -226,7 +668,7 @@ class CarDataClient:
         """Fetch telemetry for every configured vehicle in order."""
         results: list[VehicleStatus] = []
         for vehicle in vehicles:
-            if not vehicle.is_configured:
+            if not vehicle.has_credentials(self._token_store):
                 logger.debug(
                     "Skipping unconfigured CarData vehicle",
                     extra={"event": "cardata_vehicle_skipped", "vehicle": vehicle.vehicle_key},
@@ -234,6 +676,57 @@ class CarDataClient:
                 continue
             results.append(self.fetch_vehicle_status(vehicle))
         return results
+
+    def _get_telematic_response(
+        self,
+        token: str,
+        vin: str,
+        container_id: str | None,
+        vehicle_key: str,
+    ) -> httpx.Response:
+        url = f"{self._base_url}{_TELEMATIC_PATH_TEMPLATE.format(vin=vin)}"
+        params = {"containerId": container_id} if container_id else None
+        try:
+            return self._client.get(
+                url,
+                params=params,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "x-version": "v1",
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise ApiClientError(
+                f"BMW CarData network error for {vehicle_key}: {exc.__class__.__name__}"
+            ) from exc
+
+    def _load_compatible_record(self, config: CarDataVehicleConfig) -> CarDataTokenRecord | None:
+        if self._token_store is None or not config.client_id:
+            return None
+        record = self._token_store.get(config.vehicle_key)
+        if record is None:
+            return None
+        if record.client_id and record.client_id != config.client_id:
+            return None
+        return record
+
+    def _persist_metadata_if_applicable(
+        self,
+        config: CarDataVehicleConfig,
+        vin: str,
+        container_id: str,
+    ) -> None:
+        record = self._load_compatible_record(config)
+        if record is None or self._token_store is None:
+            return
+        updated = record.model_copy(
+            update={
+                "vin": vin,
+                "container_id": container_id,
+                "updated_at": datetime.now(tz=UTC),
+            }
+        )
+        self._token_store.upsert(config.vehicle_key, updated)
 
     def _resolve_access_token(self, config: CarDataVehicleConfig) -> str:
         cached = self._token_cache.get(config.vehicle_key)
@@ -246,10 +739,22 @@ class CarDataClient:
                 self._token_cache[config.vehicle_key] = token
                 return token
 
-        if not config.client_id or config.refresh_token is None:
+        stored = self._load_compatible_record(config)
+        if stored is not None and stored.has_valid_access_token():
+            token = stored.access_token.get_secret_value().strip()
+            self._token_cache[config.vehicle_key] = token
+            return token
+
+        refresh_secret = (
+            stored.refresh_token
+            if stored is not None and stored.refresh_token is not None
+            else config.refresh_token
+        )
+        if not config.client_id or refresh_secret is None:
             raise AuthenticationError(
-                f"Missing CarData credentials for {config.display_name}: provide "
-                "`access_token` or (`client_id` + `refresh_token`)"
+                f"Missing CarData credentials for {config.display_name}: run "
+                "`uv run pstryk-pilot cardata-auth` or provide `access_token` / "
+                "(`client_id` + `refresh_token`)"
             )
 
         try:
@@ -258,7 +763,7 @@ class CarDataClient:
                 data={
                     "grant_type": "refresh_token",
                     "client_id": config.client_id,
-                    "refresh_token": config.refresh_token.get_secret_value(),
+                    "refresh_token": refresh_secret.get_secret_value(),
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
@@ -272,49 +777,59 @@ class CarDataClient:
             response,
             service=f"BMW CarData OAuth ({config.display_name})",
         )
+        bundle = self._parse_oauth_bundle(payload, context=config.display_name)
+        resolved = bundle.access_token.get_secret_value()
+        self._token_cache[config.vehicle_key] = resolved
+
+        if self._token_store is not None:
+            now = datetime.now(tz=UTC)
+            new_refresh = (
+                bundle.refresh_token if bundle.refresh_token is not None else refresh_secret
+            )
+            self._token_store.upsert(
+                config.vehicle_key,
+                CarDataTokenRecord(
+                    access_token=bundle.access_token,
+                    refresh_token=new_refresh,
+                    expires_at=now + timedelta(seconds=bundle.expires_in),
+                    client_id=config.client_id,
+                    vin=config.vin or (stored.vin if stored else None),
+                    container_id=config.container_id or (stored.container_id if stored else None),
+                    updated_at=now,
+                ),
+            )
+
+        return resolved
+
+    @classmethod
+    def _parse_oauth_bundle(cls, payload: dict[str, Any], context: str) -> OAuthTokenBundle:
         token_val = payload.get("access_token") or payload.get("id_token")
         if not isinstance(token_val, str) or not token_val.strip():
             raise PayloadParseError(
-                f"BMW CarData OAuth response for {config.display_name} missing 'access_token'"
+                f"BMW CarData OAuth response for {context} missing 'access_token'"
             )
-
-        resolved = token_val.strip()
-        self._token_cache[config.vehicle_key] = resolved
-        return resolved
-
-    def _discover_vin(self, token: str) -> str:
-        url = f"{self._base_url}{_MAPPINGS_PATH}"
-        try:
-            response = self._client.get(
-                url,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "x-version": "v1",
-                },
-            )
-        except httpx.HTTPError as exc:
-            raise ApiClientError(
-                f"BMW CarData VIN discovery network error: {exc.__class__.__name__}"
-            ) from exc
-
-        payload = parse_json_response(response, service="BMW CarData VIN mappings")
-        mappings = payload.get("mappings") or payload.get("vehicles")
-        if not isinstance(mappings, list) or not mappings:
-            raise PayloadParseError("BMW CarData mappings response contained no vehicles")
-
-        primary = next(
-            (
-                item
-                for item in mappings
-                if isinstance(item, dict)
-                and str(item.get("mappingType", "")).upper() == "PRIMARY"
-                and item.get("vin")
-            ),
-            mappings[0] if isinstance(mappings[0], dict) else None,
+        raw_refresh = payload.get("refresh_token")
+        refresh_secret = (
+            SecretStr(raw_refresh.strip())
+            if isinstance(raw_refresh, str) and raw_refresh.strip()
+            else None
         )
-        if not isinstance(primary, dict) or not isinstance(primary.get("vin"), str):
-            raise PayloadParseError("BMW CarData mappings entry did not include a valid 'vin'")
-        return primary["vin"].strip()
+        expires_in = cls._parse_optional_int(payload.get("expires_in"), 60, 86_400) or 3600
+        return OAuthTokenBundle(
+            access_token=SecretStr(token_val.strip()),
+            refresh_token=refresh_secret,
+            expires_in=expires_in,
+        )
+
+    @staticmethod
+    def _extract_oauth_error_code(response: httpx.Response) -> str | None:
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        if isinstance(body, dict) and isinstance(body.get("error"), str):
+            return body["error"].strip().lower()
+        return None
 
     @staticmethod
     def _parse_required_soc(data: dict[str, Any], display_name: str) -> int:

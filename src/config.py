@@ -43,13 +43,16 @@ class Settings(BaseSettings):
 
     # --- BMW CarData (BMW & MINI) ---
     cardata_base_url: str = "https://api-cardata.bmwgroup.com"
+    cardata_device_code_url: str = "https://customer.bmwgroup.com/gcdm/oauth/device/code"
     cardata_token_url: str = "https://customer.bmwgroup.com/gcdm/oauth/token"
     bmw_cardata_client_id: str | None = None
     bmw_vin: str | None = None
+    bmw_cardata_container_id: str | None = None
     bmw_cardata_access_token: SecretStr | None = None
     bmw_cardata_refresh_token: SecretStr | None = None
     mini_cardata_client_id: str | None = None
     mini_vin: str | None = None
+    mini_cardata_container_id: str | None = None
     mini_cardata_access_token: SecretStr | None = None
     mini_cardata_refresh_token: SecretStr | None = None
     bmw_soc_threshold: int = Field(default=20, ge=5, le=95)
@@ -84,6 +87,7 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_dir: Path = Path("logs")
     state_file: Path = Path("data/state.json")
+    cardata_tokens_file: Path = Path("data/cardata_tokens.json")
     alert_cooldown_hours: float = Field(default=12.0, ge=0.0)
 
     @field_validator(
@@ -99,10 +103,12 @@ class Settings(BaseSettings):
         "deye_station_id",
         "bmw_cardata_client_id",
         "bmw_vin",
+        "bmw_cardata_container_id",
         "bmw_cardata_access_token",
         "bmw_cardata_refresh_token",
         "mini_cardata_client_id",
         "mini_vin",
+        "mini_cardata_container_id",
         "mini_cardata_access_token",
         "mini_cardata_refresh_token",
         "solar_latitude",

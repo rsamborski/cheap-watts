@@ -5,16 +5,35 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 import uuid
-from collections.abc import Sequence
-from datetime import UTC, datetime
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
+
+import httpx
 
 from src import __version__
+from src.clients.cardata import (
+    CarDataClient,
+    CarDataTokenRecord,
+    CarDataTokenStore,
+    CarDataVehicleConfig,
+)
+from src.clients.errors import ApiClientError
 from src.config import Settings, load_settings
 from src.logging_setup import setup_logging
-from src.probe import ProbeTarget, format_probe_report, run_probes
+from src.probe import (
+    ProbeTarget,
+    _mask_identifier,
+    build_cardata_vehicles,
+    format_probe_report,
+    run_probes,
+)
 from src.state import StateStore
+
+VehicleTarget = Literal["all", "bmw", "mini"]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,6 +82,18 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("all", "pstryk", "solar", "deye", "cardata"),
         default="all",
         help="Probe a single service or all services (default: all).",
+    )
+
+    auth_parser = subparsers.add_parser(
+        "cardata-auth",
+        help="Authorize BMW / MINI CarData via OAuth 2.0 Device Code + PKCE flow.",
+    )
+    auth_parser.add_argument(
+        "--vehicle",
+        "-v",
+        choices=("all", "bmw", "mini"),
+        default="all",
+        help="Authorize both vehicles or a single vehicle (default: all).",
     )
 
     return parser
@@ -164,6 +195,142 @@ def execute_probe(settings: Settings, target: ProbeTarget = "all") -> int:
     return 1 if has_failures else 0
 
 
+def execute_cardata_auth(
+    settings: Settings,
+    vehicle_target: VehicleTarget = "all",
+    transport: httpx.BaseTransport | None = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> int:
+    """Run interactive OAuth 2.0 Device Code + PKCE flow for BMW / MINI CarData."""
+    setup_logging(
+        settings.log_dir,
+        level=settings.log_level,
+        tz_name=settings.timezone,
+    )
+    logger = logging.getLogger("pstryk_pilot.main")
+
+    all_vehicles = build_cardata_vehicles(settings)
+    selected = [
+        v for v in all_vehicles if vehicle_target == "all" or v.vehicle_key == vehicle_target
+    ]
+    with_client_id = [v for v in selected if v.client_id and v.client_id.strip()]
+
+    if not with_client_id:
+        if vehicle_target == "bmw":
+            missing_hint = "BMW_CARDATA_CLIENT_ID"
+        elif vehicle_target == "mini":
+            missing_hint = "MINI_CARDATA_CLIENT_ID"
+        else:
+            missing_hint = "BMW_CARDATA_CLIENT_ID and/or MINI_CARDATA_CLIENT_ID"
+        print(
+            f"[FAIL] No CarData Client ID configured ({missing_hint}).\n"
+            "  1. Sign in to My BMW / MINI Portal -> BMW CarData -> Create CarData Client.\n"
+            "  2. Copy the Client ID into your .env file and re-run this command."
+        )
+        return 1
+
+    for skipped in selected:
+        if not (skipped.client_id and skipped.client_id.strip()):
+            print(
+                f"  [SKIP] {skipped.display_name}: "
+                f"{skipped.vehicle_key.upper()}_CARDATA_CLIENT_ID not set in .env"
+            )
+
+    grouped: dict[str, list[CarDataVehicleConfig]] = {}
+    for veh in with_client_id:
+        assert veh.client_id is not None
+        cid = veh.client_id.strip()
+        grouped.setdefault(cid, []).append(veh)
+
+    token_store = CarDataTokenStore(settings.cardata_tokens_file)
+
+    try:
+        with CarDataClient(
+            base_url=settings.cardata_base_url,
+            token_url=settings.cardata_token_url,
+            device_code_url=settings.cardata_device_code_url,
+            transport=transport,
+            token_store=token_store,
+        ) as client:
+            for client_id, group_vehicles in grouped.items():
+                label = ", ".join(v.display_name for v in group_vehicles)
+                challenge = client.request_device_code(client_id)
+                target_url = challenge.verification_uri_complete or challenge.verification_uri
+                minutes = max(1, round(challenge.expires_in / 60))
+
+                print(f"\n=== BMW Group CarData Authorization ({label}) ===", flush=True)
+                print(f"  1. Open in your browser:\n     {target_url}", flush=True)
+                if (
+                    challenge.verification_uri_complete
+                    and challenge.verification_uri != challenge.verification_uri_complete
+                ):
+                    print(f"     (Base URL: {challenge.verification_uri})", flush=True)
+                print(f"  2. Sign in and confirm user code: {challenge.user_code}", flush=True)
+                print(f"Waiting for browser approval (expires in ~{minutes}m)...", flush=True)
+
+                bundle = client.poll_device_token(
+                    client_id=client_id,
+                    challenge=challenge,
+                    sleep_fn=sleep_fn,
+                )
+                access_raw = bundle.access_token.get_secret_value()
+
+                shared_container_id: str | None = None
+                if any(not (v.container_id and v.container_id.strip()) for v in group_vehicles):
+                    shared_container_id = client.ensure_container(access_raw)
+
+                now = datetime.now(tz=UTC)
+                for veh in group_vehicles:
+                    vin = (
+                        veh.vin.strip()
+                        if veh.vin and veh.vin.strip()
+                        else client.discover_vin(access_raw, vehicle_key=veh.vehicle_key)
+                    )
+                    veh_container = (
+                        veh.container_id.strip()
+                        if veh.container_id and veh.container_id.strip()
+                        else shared_container_id
+                    )
+                    token_store.upsert(
+                        veh.vehicle_key,
+                        CarDataTokenRecord(
+                            access_token=bundle.access_token,
+                            refresh_token=bundle.refresh_token,
+                            expires_at=now + timedelta(seconds=bundle.expires_in),
+                            client_id=client_id,
+                            vin=vin,
+                            container_id=veh_container,
+                            updated_at=now,
+                        ),
+                    )
+                    logger.info(
+                        "Authorized CarData vehicle",
+                        extra={
+                            "event": "cardata_auth_ok",
+                            "vehicle": veh.vehicle_key,
+                        },
+                    )
+                    print(
+                        f"  [OK] {veh.display_name} authorized | "
+                        f"VIN: {_mask_identifier(vin)} | "
+                        f"Container: {_mask_identifier(veh_container)}",
+                        flush=True,
+                    )
+    except ApiClientError as exc:
+        logger.error(
+            "CarData authorization failed",
+            extra={"event": "cardata_auth_failed", "error": str(exc)},
+        )
+        print(f"[FAIL] CarData authorization failed: {exc}")
+        return 1
+
+    print(
+        f"\nSaved rotated tokens to {settings.cardata_tokens_file}.\n"
+        "Next step: uv run pstryk-pilot probe -s cardata"
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse CLI arguments and dispatch the requested command."""
     parser = build_parser()
@@ -182,6 +349,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return execute_status(settings)
     if args.command == "probe":
         return execute_probe(settings, target=args.service)
+    if args.command == "cardata-auth":
+        return execute_cardata_auth(settings, vehicle_target=args.vehicle)
 
     parser.print_help()
     return 2

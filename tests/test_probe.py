@@ -55,7 +55,7 @@ def test_run_probes_all_services_succeed_with_fixtures() -> None:
         raise AssertionError(f"Unexpected Deye path: {request.url.path}")
 
     def cardata_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1/customers/vehicles/WBA0000000EXAMPLE1/telematicData":
+        if request.url.path == "/customers/vehicles/WBA0000000EXAMPLE1/telematicData":
             return httpx.Response(200, content=bmw_bytes)
         raise AssertionError(f"Unexpected CarData path: {request.url.path}")
 
