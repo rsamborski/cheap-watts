@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     battery_min_soc: int = Field(default=20, ge=5, le=90)
     battery_max_charge_kw: float = Field(default=5.0, gt=0)
     typical_daily_usage_kwh: float = Field(default=12.0, gt=0)
+    usage_buffer_pct: float = Field(default=10.0, ge=0.0, le=100.0)
 
     # --- BMW CarData (BMW & MINI) ---
     cardata_base_url: str = "https://api-cardata.bmwgroup.com"

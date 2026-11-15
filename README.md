@@ -13,7 +13,7 @@ A headless Home Energy Management System (HEMS) written in Python 3.12+ (`uv`), 
 
 1. **PV-First Battery Strategy:**
    - **Sufficient Sun (`24h PV >= SOLAR_SUFFICIENT_KWH_THRESHOLD`):** Turns Deye Time-of-Use (TOU) **grid-charging OFF** across all 6 slots so rooftop PV charges the home battery for free.
-   - **Low Sun / Cloudy Weather:** Dynamically sizes grid energy deficit (`min(target_soc, min_soc + typical_daily_usage) - current_soc - expected_pv`) and selects the globally cheapest **1–2 contiguous Pstryk windows** mapped cleanly onto Deye's 6-slot `00:00..24:00` TOU ring.
+   - **Low Sun / Cloudy Weather:** Excludes the untouchable `BATTERY_MIN_SOC` reserve from usable battery energy, applies `USAGE_BUFFER_PCT` (`+10%` default) to `TYPICAL_DAILY_USAGE_KWH`, and selects the globally cheapest **1–2 contiguous Pstryk windows** mapped cleanly onto Deye's 6-slot `00:00..24:00` TOU ring.
 2. **EV Priority & Strict Non-Overlap (BMW & MINI):**
    - **Active EV Session Detection:** If BMW CarData reports an EV is actively charging, skips redundant EV alerts and blocks those hours from Deye grid-charging.
    - **Post-EV Battery Ordering:** Whenever an EV is actively charging or recommended a charging window (`BMW <= 20%`, `MINI <= 40%`), Deye home battery grid-charging is scheduled **strictly after** the EV window so EV charging never drains freshly grid-charged battery capacity.
@@ -129,7 +129,8 @@ uv run pstryk-pilot run
 | `BATTERY_CAPACITY_KWH` | `10.0` | Total usable home battery capacity in kWh. |
 | `BATTERY_MIN_SOC` / `BATTERY_TARGET_SOC` | `20` / `95` | Discharge floor SoC (%) and max grid-charge ceiling SoC (%). |
 | `BATTERY_MAX_CHARGE_KW` | `5.0` | Expected grid charging power (kW) used to size window duration. |
-| `TYPICAL_DAILY_USAGE_KWH` | `12.0` | Daily household kWh target capping low-sun battery grid-charging. |
+| `TYPICAL_DAILY_USAGE_KWH` | `12.0` | Typical 24h household consumption in kWh. |
+| `USAGE_BUFFER_PCT` | `10.0` | Safety buffer (%) added to `TYPICAL_DAILY_USAGE_KWH` for unexpected loads. |
 | `SOLAR_SUFFICIENT_KWH_THRESHOLD` | `12.0` | 24h PV kWh threshold at/above which Deye grid-charging is disabled. |
 | `BMW_SOC_THRESHOLD` / `MINI_SOC_THRESHOLD` | `20` / `40` | EV SoC (%) thresholds triggering charging recommendations. |
 | `EV_SLOW_CHARGE_AMPS` | `8` | Recommended slow-charge current (`6–16A`) during sunny PV windows. |

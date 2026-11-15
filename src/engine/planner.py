@@ -309,21 +309,33 @@ def _compute_battery_deficit(
     expected_pv_kwh: float,
     solar_sufficient: bool,
 ) -> tuple[float, int]:
-    """Compute `(grid_deficit_kwh, planned_target_soc)` under the daily-usage cap."""
+    """Compute `(grid_deficit_kwh, planned_target_soc)` excluding `BATTERY_MIN_SOC` reserve.
+
+    Energy at or below `BATTERY_MIN_SOC` is an untouchable outage/lifespan reserve and is
+    never counted as usable energy for daily consumption. Expected daily usage is scaled by
+    `1 + usage_buffer_pct / 100` (default +10%), and the resulting shortfall is only clamped
+    at the end to physical battery headroom up to `BATTERY_TARGET_SOC`.
+    """
     if solar_sufficient:
         return 0.0, settings.battery_min_soc
 
     capacity = settings.battery_capacity_kwh
-    min_energy_kwh = (settings.battery_min_soc / 100.0) * capacity
+    min_reserve_kwh = (settings.battery_min_soc / 100.0) * capacity
     target_cap_kwh = (settings.battery_target_soc / 100.0) * capacity
-    usage_cap_kwh = min(target_cap_kwh, min_energy_kwh + settings.typical_daily_usage_kwh)
     current_energy_kwh = (current_soc / 100.0) * capacity
 
-    deficit_kwh = round(max(0.0, usage_cap_kwh - current_energy_kwh - expected_pv_kwh), 3)
+    usable_current_kwh = current_energy_kwh - min_reserve_kwh
+    headroom_to_target_kwh = max(0.0, target_cap_kwh - current_energy_kwh)
+
+    buffered_demand_kwh = settings.typical_daily_usage_kwh * (
+        1.0 + settings.usage_buffer_pct / 100.0
+    )
+    raw_shortfall_kwh = max(0.0, buffered_demand_kwh - usable_current_kwh - expected_pv_kwh)
+    deficit_kwh = round(min(headroom_to_target_kwh, raw_shortfall_kwh), 3)
     if deficit_kwh <= 0.0:
         return 0.0, settings.battery_min_soc
 
-    planned_energy_kwh = min(usage_cap_kwh, current_energy_kwh + deficit_kwh)
+    planned_energy_kwh = min(target_cap_kwh, current_energy_kwh + deficit_kwh)
     raw_soc = int(round((planned_energy_kwh / capacity) * 100.0))
     min_required = min(settings.battery_target_soc, max(settings.battery_min_soc, current_soc + 1))
     planned_soc = min(settings.battery_target_soc, max(min_required, raw_soc))

@@ -212,14 +212,15 @@ def test_cloudy_winter_post_ev_ordering_and_both_evs_below_threshold() -> None:
     assert plan.ev_recommendations[1].vehicle_key == "mini"
     assert plan.ev_recommendations[1].recommended_window == "03:00-06:00"
 
-    # Deficit = 9.5 - 2.0 - 1.2 = 6.3 kWh -> 2h at 5 kW -> 06:00-08:00 (strictly AFTER 06:00!)
-    assert plan.grid_deficit_kwh == 6.3
+    # Buffered demand = 12.0 * 1.10 = 13.2 kWh; usable battery at 20% floor = 0.0 kWh; PV = 1.2 kWh
+    # Raw shortfall = 12.0 kWh -> clamped to headroom (9.5 - 2.0 = 7.5 kWh) -> 2h at 5 kW -> 95%
+    assert plan.grid_deficit_kwh == 7.5
     _assert_valid_deye_6_slot_ring(plan.target_tou_slots)
     active_slots = [s for s in plan.target_tou_slots if s.grid_charge]
     assert len(active_slots) == 1
     assert active_slots[0].start_time == "06:00"
     assert active_slots[0].end_time == "08:00"
-    assert active_slots[0].target_soc == 83
+    assert active_slots[0].target_soc == 95
 
 
 def test_active_ev_charging_skips_ev_alerts_and_schedules_deye_strictly_after() -> None:
@@ -339,13 +340,51 @@ def test_daily_usage_cap_limits_grid_charging_below_battery_target_soc() -> None
         now=now,
     )
 
-    # Deficit = 6.0 - 2.5 - 0.5 = 3.0 kWh -> planned SoC = 55% (well below 95%!)
-    assert plan.grid_deficit_kwh == 3.0
+    # Buffered demand = 4.0 * 1.10 = 4.4 kWh; usable battery above 20% = 0.5 kWh; PV = 0.5 kWh
+    # Deficit = 4.4 - 0.5 - 0.5 = 3.4 kWh -> planned SoC = 25% + 34% = 59% (well below 95%!)
+    assert plan.grid_deficit_kwh == 3.4
     active_slots = [s for s in plan.target_tou_slots if s.grid_charge]
     assert len(active_slots) == 1
     assert active_slots[0].start_time == "02:00"
     assert active_slots[0].end_time == "03:00"
-    assert active_slots[0].target_soc == 55
+    assert active_slots[0].target_soc == 59
+
+
+def test_min_soc_15pct_reserve_excluded_and_10pct_usage_buffer() -> None:
+    now = datetime(2026, 11, 16, 0, 0, tzinfo=WARSAW)
+    hourly_rates = [0.80] * 24
+    hourly_rates[2] = 0.22
+    hourly_rates[3] = 0.24
+    prices = _make_hourly_prices(now, hourly_rates)
+    # 5.22 kWh expected PV across 24h
+    forecast = _make_solar_forecast(now, [0.0] * 10 + [2.61, 2.61] + [0.0] * 12)
+
+    settings = Settings(
+        _env_file=None,
+        battery_capacity_kwh=10.0,
+        battery_min_soc=15,
+        battery_target_soc=95,
+        battery_max_charge_kw=5.0,
+        typical_daily_usage_kwh=12.0,
+        usage_buffer_pct=10.0,
+        solar_sufficient_kwh_threshold=12.0,
+    )
+    # Battery is sitting at its 15% reserve floor -> 0.0 kWh usable energy!
+    # Buffered demand = 12.0 * 1.10 = 13.2 kWh -> shortfall = 13.2 - 0.0 - 5.22 = 7.98 kWh!
+    plan = plan_charging_schedule(
+        settings=settings,
+        inverter=_make_inverter(soc=15),
+        price_slots=prices,
+        solar_forecast=forecast,
+        now=now,
+    )
+
+    assert plan.grid_deficit_kwh == 7.98
+    active_slots = [s for s in plan.target_tou_slots if s.grid_charge]
+    assert len(active_slots) == 1
+    assert active_slots[0].start_time == "02:00"
+    assert active_slots[0].end_time == "04:00"
+    assert active_slots[0].target_soc == 95
 
 
 def test_missing_tomorrow_prices_before_1400_and_midnight_wrap_mapping() -> None:
