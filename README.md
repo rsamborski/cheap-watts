@@ -4,6 +4,7 @@
 [![Format — Black](https://github.com/rsamborski/pstryk-pilot/actions/workflows/format.yml/badge.svg?branch=main)](https://github.com/rsamborski/pstryk-pilot/actions/workflows/format.yml)
 [![Tests & Coverage — Pytest](https://github.com/rsamborski/pstryk-pilot/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/rsamborski/pstryk-pilot/actions/workflows/tests.yml)
 [![Security Scan — Gitleaks](https://github.com/rsamborski/pstryk-pilot/actions/workflows/security-scan.yml/badge.svg?branch=main)](https://github.com/rsamborski/pstryk-pilot/actions/workflows/security-scan.yml)
+[![Docker — GHCR](https://github.com/rsamborski/pstryk-pilot/actions/workflows/docker-publish.yml/badge.svg?branch=main)](https://github.com/rsamborski/pstryk-pilot/actions/workflows/docker-publish.yml)
 
 A headless Home Energy Management System (HEMS) written in Python 3.12+ (`uv`), invoked periodically via `cron` to optimize **Deye SUN-10K-SG04LP3-EU** home battery charging and **BMW / MINI** EV charging recommendations against **Pstryk** dynamic hourly tariffs and **Open-Meteo** solar forecasts.
 
@@ -141,21 +142,65 @@ uv run pstryk-pilot run
 
 ## 🕒 Deployment (`cron` & `Docker`)
 
-### Option A: Native Linux / Host `cron`
-See [`deploy/crontab.example`](deploy/crontab.example). Schedule every **30 minutes** (`48 runs/day`, staying within BMW CarData's 50 requests/day quota per account):
+### Option A (Recommended): Mini PC + Docker + GHCR Auto-Update
+Every merge to `main` runs all CI checks and publishes `ghcr.io/rsamborski/pstryk-pilot:latest` (and `:sha-<short_sha>`). The Mini PC needs no `git` checkout or Python toolchain:
 
-1. **Burn-in with `--dry-run` first:**
-   ```cron
-   */30 * * * * cd /path/to/pstryk-pilot && uv run pstryk-pilot run --dry-run >> /path/to/pstryk-pilot/logs/cron.log 2>&1
+1. **Bootstrap `/opt/pstryk-pilot` (`UID/GID 1000` matches the container `pilot` user):**
+   ```bash
+   ./deploy/setup-minipc.sh
+   # Creates /opt/pstryk-pilot/{data,logs} (1000:1000) and /opt/pstryk-pilot/.env (0600)
    ```
-   Review `logs/pstryk-pilot.log` and `[DRY-RUN]` emails over several cycles/days.
-2. **Switch to live writes:** remove `--dry-run` (and ensure `DRY_RUN=false` in `.env`).
+   Copy `.env.example` into `/opt/pstryk-pilot/.env` and fill in your credentials/settings.
 
-### Option B: Docker
+2. **Authenticate Docker to GHCR (one-time if the package is private):**
+   ```bash
+   docker login ghcr.io -u rsamborski
+   # Paste a GitHub Personal Access Token with read:packages scope
+   docker pull ghcr.io/rsamborski/pstryk-pilot:latest
+   ```
+
+3. **Provision BMW CarData tokens:**
+   Either copy an existing `data/cardata_tokens.json` (`chmod 600` and `chown 1000:1000`), or run interactive OAuth inside the container:
+   ```bash
+   docker run -it --rm \
+     --env-file /opt/pstryk-pilot/.env \
+     -v /opt/pstryk-pilot/data:/app/data \
+     ghcr.io/rsamborski/pstryk-pilot:latest cardata-auth
+   ```
+
+4. **Verify connectivity & dry-run before enabling `cron` (`--network host` is required for local Solarman V5 `:8899`):**
+   ```bash
+   docker run --rm --network host \
+     --env-file /opt/pstryk-pilot/.env \
+     -v /opt/pstryk-pilot/data:/app/data \
+     -v /opt/pstryk-pilot/logs:/app/logs \
+     ghcr.io/rsamborski/pstryk-pilot:latest probe
+
+   docker run --rm --network host \
+     --env-file /opt/pstryk-pilot/.env \
+     -v /opt/pstryk-pilot/data:/app/data \
+     -v /opt/pstryk-pilot/logs:/app/logs \
+     ghcr.io/rsamborski/pstryk-pilot:latest run --dry-run
+   ```
+
+5. **Install the Mini PC `crontab` (`crontab -e`, see [`deploy/crontab.example`](deploy/crontab.example)):**
+   Schedule every **30 minutes** (`48 runs/day`, staying within BMW CarData's 50 requests/day quota per account), with image updates decoupled so a transient internet/GHCR outage never blocks local LAN inverter control:
+   ```cron
+   # Start with --dry-run during burn-in, then drop --dry-run to go live:
+   */30 * * * * docker run --rm --network host --env-file /opt/pstryk-pilot/.env -v /opt/pstryk-pilot/data:/app/data -v /opt/pstryk-pilot/logs:/app/logs ghcr.io/rsamborski/pstryk-pilot:latest run >> /opt/pstryk-pilot/logs/cron.log 2>&1
+   15 * * * * docker pull --quiet ghcr.io/rsamborski/pstryk-pilot:latest >> /opt/pstryk-pilot/logs/cron.log 2>&1
+   0 4 * * 0 docker image prune -f >> /opt/pstryk-pilot/logs/cron.log 2>&1
+   ```
+
+### Option B: Local `uv` Checkout / Local `docker build`
+For running directly from a cloned repo without GHCR:
+```cron
+# Native uv cron (burn-in with --dry-run first, then remove --dry-run):
+*/30 * * * * cd /path/to/pstryk-pilot && uv run pstryk-pilot run --dry-run >> /path/to/pstryk-pilot/logs/cron.log 2>&1
+```
+Or build and run locally with Docker:
 ```bash
 docker build -t pstryk-pilot:latest .
-
-# Run a single --dry-run cycle (--network host allows reaching local LAN :8899):
 docker run --rm --network host \
   --env-file .env \
   -v "$(pwd)/data:/app/data" \
@@ -166,6 +211,8 @@ docker run --rm --network host \
 ---
 
 ## 🧪 Development & Quality Gates
+
+Because `main` is branch-protected and publishes to GHCR on merge, develop every change on a descriptive branch (`feat/...`, `fix/...`, `chore/...`, `docs/...`), run all checks locally, and open a Pull Request targeting `main`:
 
 ```bash
 uv run black src tests

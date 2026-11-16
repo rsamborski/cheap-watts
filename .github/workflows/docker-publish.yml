@@ -1,0 +1,73 @@
+name: Docker — GHCR
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-and-push:
+    name: Build & Publish Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+
+      - name: Build and smoke-test Docker image (PR validation)
+        if: github.event_name == 'pull_request'
+        env:
+          REPO_NAME: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build \
+            --label "org.opencontainers.image.source=https://github.com/${REPO_NAME}" \
+            --label "org.opencontainers.image.revision=${COMMIT_SHA}" \
+            -t pstryk-pilot:ci \
+            .
+          docker run --rm pstryk-pilot:ci --help
+
+      - name: Log in, build, smoke-test, and push to GHCR
+        if: github.event_name != 'pull_request'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_ACTOR: ${{ github.actor }}
+          REPO_NAME: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${REPO_NAME,,}"
+          SHORT_TAG="sha-${COMMIT_SHA::7}"
+
+          printf '%s\n' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_ACTOR}" --password-stdin
+
+          docker pull "${IMAGE}:latest" || true
+
+          DOCKER_BUILDKIT=1 docker build \
+            --pull \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --cache-from "${IMAGE}:latest" \
+            --label "org.opencontainers.image.source=https://github.com/${REPO_NAME}" \
+            --label "org.opencontainers.image.revision=${COMMIT_SHA}" \
+            -t "${IMAGE}:latest" \
+            -t "${IMAGE}:${SHORT_TAG}" \
+            .
+
+          docker run --rm "${IMAGE}:${SHORT_TAG}" --help
+
+          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:${SHORT_TAG}"

@@ -12,13 +12,27 @@
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
 
-# --- Stage 1: Dry-Run Burn-In (recommended for the first few days) ---
-# Reads live APIs, logs diffs, and sends [DRY-RUN] emails without mutating Deye:
-*/30 * * * * cd /path/to/pstryk-pilot && uv run pstryk-pilot run --dry-run >> /path/to/pstryk-pilot/logs/cron.log 2>&1
+# ==============================================================================
+# Option A (Recommended): Mini PC + Docker + GHCR Auto-Update
+# Host setup: /opt/pstryk-pilot/{.env,data,logs} (see deploy/setup-minipc.sh)
+# Note: --network host is required so the container reaches Deye Solarman V5
+# (:8899) directly on the home LAN.
+# ==============================================================================
 
-# --- Stage 2: Live Production Execution (uncomment & disable Stage 1 once verified) ---
+# --- Stage 1: Dry-Run Burn-In (enable first, then switch to Stage 2) ---
+# */30 * * * * docker run --rm --network host --env-file /opt/pstryk-pilot/.env -v /opt/pstryk-pilot/data:/app/data -v /opt/pstryk-pilot/logs:/app/logs ghcr.io/rsamborski/pstryk-pilot:latest run --dry-run >> /opt/pstryk-pilot/logs/cron.log 2>&1
+
+# --- Stage 2: Live Production Execution ---
+*/30 * * * * docker run --rm --network host --env-file /opt/pstryk-pilot/.env -v /opt/pstryk-pilot/data:/app/data -v /opt/pstryk-pilot/logs:/app/logs ghcr.io/rsamborski/pstryk-pilot:latest run >> /opt/pstryk-pilot/logs/cron.log 2>&1
+
+# --- Image Auto-Update (decoupled from */30 run so GHCR/WAN outages never block local LAN control) ---
+15 * * * * docker pull --quiet ghcr.io/rsamborski/pstryk-pilot:latest >> /opt/pstryk-pilot/logs/cron.log 2>&1
+
+# --- Weekly Docker Image Housekeeping ---
+0 4 * * 0 docker image prune -f >> /opt/pstryk-pilot/logs/cron.log 2>&1
+
+# ==============================================================================
+# Option B: Local Python / uv Checkout (without Docker)
+# ==============================================================================
+# */30 * * * * cd /path/to/pstryk-pilot && uv run pstryk-pilot run --dry-run >> /path/to/pstryk-pilot/logs/cron.log 2>&1
 # */30 * * * * cd /path/to/pstryk-pilot && uv run pstryk-pilot run >> /path/to/pstryk-pilot/logs/cron.log 2>&1
-
-# --- Alternative: Docker One-Shot Container via Host Cron ---
-# Note: requires --network host (or LAN routing) when using local Solarman V5 (:8899).
-# */30 * * * * docker run --rm --network host --env-file /opt/pstryk-pilot/.env -v /opt/pstryk-pilot/data:/app/data -v /opt/pstryk-pilot/logs:/app/logs pstryk-pilot:latest run --dry-run

@@ -46,12 +46,12 @@ Track progress across implementation phases. Update checkboxes as tasks are comp
 - [x] Validate end-to-end `--dry-run` execution against live APIs and verify `[DRY-RUN]` email output.
 
 ## Phase 6: Automated Deployment (GitHub Actions + Mini PC)
-- [ ] Add GitHub Actions workflow (`.github/workflows/docker-publish.yml`) to build and push `ghcr.io/rsamborski/pstryk-pilot:latest` (and `:sha-...`) on pushes to `main` after CI checks pass.
-- [ ] Set up Mini PC host directory (`/opt/pstryk-pilot` or similar) with `.env`, persistent `data/` and `logs/` volumes, and initial `cardata-auth` token provisioning.
+- [x] Add GitHub Actions workflow (`.github/workflows/docker-publish.yml`) to build and push `ghcr.io/rsamborski/pstryk-pilot:latest` (and `:sha-...`) on pushes to `main` after CI checks pass.
+- [x] Set up Mini PC host directory (`/opt/pstryk-pilot` or similar) with `.env`, persistent `data/` and `logs/` volumes, and initial `cardata-auth` token provisioning.
 - [ ] Configure Mini PC `crontab` for 30-minute `docker run --rm --network host` execution, periodic `docker pull` update checks, and weekly `docker image prune`.
-- [ ] Document Mini PC + GHCR deployment and update flow in `README.md` and `deploy/`.
+- [x] Document Mini PC + GHCR deployment and update flow in `README.md` and `deploy/`.
 - [ ] *(Manual)* Configure GitHub branch protection on `main` to require pull requests (no direct pushes) and passing CI checks.
-- [ ] Update AGENTS.md to reflect the new workflow with branches for all new features/bug fixes instead of direct main pushes.
+- [x] Update AGENTS.md to reflect the new workflow with branches for all new features/bug fixes instead of direct main pushes.
 
 ---
 

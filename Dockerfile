@@ -1,16 +1,23 @@
 # syntax=docker/dockerfile:1
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
+LABEL org.opencontainers.image.title="pstryk-pilot" \
+      org.opencontainers.image.description="Headless Home Energy Management System optimizing Deye battery storage and EV charging with Pstryk dynamic tariffs." \
+      org.opencontainers.image.source="https://github.com/rsamborski/pstryk-pilot" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    TZ=Europe/Warsaw
+    TZ=Europe/Warsaw \
+    PATH="/app/.venv/bin:$PATH"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tzdata ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --shell /bin/bash pilot
+    && groupadd --gid 1000 pilot \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash pilot
 
 WORKDIR /app
 
@@ -25,5 +32,5 @@ USER pilot
 
 VOLUME ["/app/data", "/app/logs"]
 
-ENTRYPOINT ["uv", "run", "--no-sync", "pstryk-pilot"]
+ENTRYPOINT ["pstryk-pilot"]
 CMD ["run"]

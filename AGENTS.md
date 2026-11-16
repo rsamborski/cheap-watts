@@ -45,3 +45,11 @@ Any changes that are smaller or iterative are still going to be checked by:
 - **Secrets Hygiene:** Never commit `.env` or real API keys/tokens. Keep secret values **blank** in `.env.example` (per `.gitleaks.toml` / pre-commit `gitleaks`). In tests, use allowlisted dummy values such as `test-api-key`. Wrap secret fields in Pydantic `SecretStr` so credentials never leak into logs.
 - **Dry-Run Invariant:** Any code path that mutates inverter settings (Deye Cloud / Solarman TOU writes) **must** check `dry_run` and strictly skip remote writes when `dry_run=True`.
 - **Project Tracking:** Keep `docs/planning/tasks.md` updated as tasks and phases are completed, and record significant architectural changes in `docs/planning/`.
+
+---
+
+## 5. Git Branching & Pull Request Workflow
+- **Protected `main` Branch:** `main` is protected on GitHub — never commit or push directly to `main`.
+- **Branch per Change:** Create a descriptive branch off up-to-date `main` for every feature, bug fix, refactor, or documentation update (e.g., `feat/<topic>`, `fix/<topic>`, `chore/<topic>`, `docs/<topic>`).
+- **Pre-PR Verification:** Run `uv run black src tests`, `uv run ruff check --fix src tests`, `uv run pytest --cov=src --cov-report=term-missing`, and `uv run pre-commit run --all-files` locally before pushing your branch and opening a Pull Request targeting `main`.
+- **Automated GHCR Publishing:** Merging an approved Pull Request into `main` (after all CI status checks pass) automatically builds and publishes `ghcr.io/rsamborski/pstryk-pilot:latest` and `:sha-<short_sha>` via `.github/workflows/docker-publish.yml`.
