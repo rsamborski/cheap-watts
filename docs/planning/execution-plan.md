@@ -132,21 +132,46 @@ flowchart TD
 
 ---
 
-## 5. Future Improvements (Post-v1)
+## 5. Production Deployment Plan (Mini PC + Docker + GHCR)
 
-The following features are planned for implementation after the core v1 functionality is complete, validated, and running reliably:
+### Build & Distribution Strategy: GitHub Actions + `ghcr.io` (Recommended)
 
-1. **Vacation Mode:**
-   - Support configuring multiple `from`/`to` date ranges via environment variables (e.g., `VACATION_RANGES`).
-   - When `pstryk-pilot` detects the current date falls within an active vacation period:
-     - Suppress all EV charging notifications.
-     - Reduce grid battery charging to the minimum required level using a configurable expected battery SoC target (e.g., `VACATION_TARGET_SOC_PCT`).
+| Option | Pros | Cons | Verdict |
+| :--- | :--- | :--- | :--- |
+| **A. GitHub Actions -> GitHub Container Registry (`ghcr.io`)** | Free for public repos (and free tier covers small private images); uses built-in `GITHUB_TOKEN` (no extra registry secrets); builds only after CI (`lint`, `format`, `tests`, `gitleaks`) passes; Mini PC needs no `git` checkout or build toolchain. | Requires internet access to pull image updates; private repos need a one-time `docker login ghcr.io` with a `read:packages` PAT. | **Recommended** |
+| **B. `git pull` + `docker build` on Mini PC** | Zero external registry dependency. | Requires `git` repo, build cache, and CPU/disk overhead on the Mini PC; not automatically gated on CI passing; needs custom script to skip redundant rebuilds. | Fallback only |
 
-2. **Historical Usage Analysis (Daily Cron Mode):**
-   - Add a separate CLI mode/subcommand (e.g., `pstryk-pilot analyze-usage`) intended to run once daily via `cron`.
-   - Fetch historical daily/hourly electrical consumption from the Deye Cloud API (subject to API data availability) and analyze usage patterns.
-   - Feed the learned daily usage patterns (plus a configurable 10–20% safety buffer) into the grid-charging planner, replacing or refining the static `TYPICAL_DAILY_USAGE_KWH` setting so the battery charges only what is needed to cover typical daily consumption.
+### CI/CD Pipeline (GitHub Actions)
+- Add `.github/workflows/docker-publish.yml` triggered on push to `main` (and optional `workflow_dispatch`):
+  1. Wait for / run quality gates (`ruff`, `black --check`, `pytest`, `gitleaks`).
+  2. Log in to `ghcr.io` using `GITHUB_TOKEN` (`permissions: packages: write`).
+  3. Build multi-layer cached image from `Dockerfile` (`linux/amd64`, or `linux/amd64,linux/arm64` if running on ARM) and push:
+     - `ghcr.io/rsamborski/pstryk-pilot:latest`
+     - `ghcr.io/rsamborski/pstryk-pilot:sha-<short_sha>`
 
-3. **Missed EV Charging Window Re-Notification:**
-   - Track the recommended EV charging window in local state (`state.py`).
-   - If the recommended window passes without the EV having started charging (e.g., due to urgent travel) and the vehicle is still below its SoC threshold, automatically select the next best available charging window (sun slow-charge or cheapest upcoming Pstryk hours) and send a follow-up notification.
+### Mini PC Runtime & Auto-Update Design
+1. **Host Directory Layout** (e.g., `/opt/pstryk-pilot`):
+   - `.env` — production secrets and site settings (never committed or baked into the image).
+   - `data/` — persistent volume for `state.json` and `cardata_tokens.json` (`0600` permissions).
+   - `logs/` — persistent volume for `pstryk-pilot.log` and `cron.log`.
+2. **Initial One-Time Setup:**
+   - Install Docker on the Mini PC.
+   - If the package is private, run `docker login ghcr.io` once with a read-only PAT (`read:packages`).
+   - Run `cardata-auth` interactively once (or copy `data/cardata_tokens.json` from setup machine).
+3. **Crontab Schedule & Update Mechanism:**
+   - **Optimization run (every 30 min):** Run the locally cached `:latest` image with `--network host` (required so the container reaches Deye Solarman V5 `:8899` on the home LAN):
+     ```cron
+     */30 * * * * docker run --rm --network host --env-file /opt/pstryk-pilot/.env -v /opt/pstryk-pilot/data:/app/data -v /opt/pstryk-pilot/logs:/app/logs ghcr.io/rsamborski/pstryk-pilot:latest run >> /opt/pstryk-pilot/logs/cron.log 2>&1
+     ```
+   - **Image update check (hourly or daily):** Run `docker pull --quiet ghcr.io/rsamborski/pstryk-pilot:latest` on a separate cron entry (e.g., `15 * * * *`) rather than `--pull=always` on the 30-min job, so a transient internet/GitHub outage never blocks a scheduled energy-optimization run.
+   - **Housekeeping (weekly):** `0 4 * * 0 docker image prune -f >> /opt/pstryk-pilot/logs/cron.log 2>&1` to clean up old untagged layers.
+
+---
+
+## 6. Future Improvements (Post-v1)
+
+Planned post-v1 enhancements are tracked in separate feature planning files:
+
+- [F001: Vacation Mode](features/F001-vacation-mode.md)
+- [F002: Historical Usage Analysis](features/F002-historical-usage-analysis.md)
+- [F003: Missed EV Charging Window Re-Notification](features/F003-missed-ev-window-renotification.md)

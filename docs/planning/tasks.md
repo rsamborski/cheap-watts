@@ -43,25 +43,21 @@ Track progress across implementation phases. Update checkboxes as tasks are comp
 ## Phase 5: Dry-Run Validation & Deployment Packaging
 - [x] Add `Dockerfile` and sample `crontab` configuration.
 - [x] Document setup, environment variables, API credential generation, and cron installation in `README.md`.
-- [X] Validate end-to-end `--dry-run` execution against live APIs and verify `[DRY-RUN]` email output.
+- [x] Validate end-to-end `--dry-run` execution against live APIs and verify `[DRY-RUN]` email output.
+
+## Phase 6: Automated Deployment (GitHub Actions + Mini PC)
+- [ ] Add GitHub Actions workflow (`.github/workflows/docker-publish.yml`) to build and push `ghcr.io/rsamborski/pstryk-pilot:latest` (and `:sha-...`) on pushes to `main` after CI checks pass.
+- [ ] Set up Mini PC host directory (`/opt/pstryk-pilot` or similar) with `.env`, persistent `data/` and `logs/` volumes, and initial `cardata-auth` token provisioning.
+- [ ] Configure Mini PC `crontab` for 30-minute `docker run --rm --network host` execution, periodic `docker pull` update checks, and weekly `docker image prune`.
+- [ ] Document Mini PC + GHCR deployment and update flow in `README.md` and `deploy/`.
+- [ ] *(Manual)* Configure GitHub branch protection on `main` to require pull requests (no direct pushes) and passing CI checks.
+- [ ] Update AGENTS.md to reflect the new workflow with branches for all new features/bug fixes instead of direct main pushes.
 
 ---
 
 ## Future Improvements (Post-v1)
-*Implement after core v1 functionality is complete and validated.*
+*Tracked in separate feature planning documents under `docs/planning/features/`:*
 
-### 1. Vacation Mode
-- [ ] Add vacation configuration in `src/config.py` and `.env.example`: multiple `from`/`to` date ranges (e.g., `VACATION_RANGES`) and expected minimum battery SoC level (`VACATION_TARGET_SOC_PCT`).
-- [ ] Update planner & notifier to detect active vacation dates, suppress EV charging notifications, and cap Deye grid-charging to the configured minimum vacation battery SoC.
-- [ ] Add unit tests covering active/inactive vacation ranges, multiple date ranges, EV notification suppression, and minimum battery target.
-
-### 2. Historical Usage Analysis
-- [ ] Investigate Deye Cloud / Solarman Open API endpoints for fetching historical daily/hourly electrical consumption.
-- [ ] Add a daily CLI subcommand/mode (e.g., `pstryk-pilot analyze-usage`) and sample daily `cron` entry to fetch past days of real usage and compute usage patterns.
-- [ ] Persist learned usage profile in `state.py` and feed it into the grid-charging planner with a configurable 10–20% buffer (replacing/refining static `TYPICAL_DAILY_USAGE_KWH`).
-- [ ] Add unit tests with historical usage fixtures, buffer calculation, and fallback to static `TYPICAL_DAILY_USAGE_KWH`.
-
-### 3. Missed EV Charging Window Re-Notification
-- [ ] Persist the recommended EV charging window (start/end timestamps and vehicle ID) in `state.py`.
-- [ ] Detect when a previously recommended EV window has elapsed without charging occurring and the EV remains below its SoC threshold, then clear/update deduplication state so a new best window is planned and emailed.
-- [ ] Add unit tests covering missed window detection, next-best window selection, and avoiding duplicate alerts while the current window is still active.
+- [F001: Vacation Mode](features/F001-vacation-mode.md)
+- [F002: Historical Usage Analysis](features/F002-historical-usage-analysis.md)
+- [F003: Missed EV Charging Window Re-Notification](features/F003-missed-ev-window-renotification.md)
