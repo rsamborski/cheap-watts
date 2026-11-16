@@ -43,7 +43,7 @@ Track progress across implementation phases. Update checkboxes as tasks are comp
 ## Phase 5: Dry-Run Validation & Deployment Packaging
 - [x] Add `Dockerfile` and sample `crontab` configuration.
 - [x] Document setup, environment variables, API credential generation, and cron installation in `README.md`.
-- [ ] Validate end-to-end `--dry-run` execution against live APIs and verify `[DRY-RUN]` email output.
+- [X] Validate end-to-end `--dry-run` execution against live APIs and verify `[DRY-RUN]` email output.
 
 ---
 
