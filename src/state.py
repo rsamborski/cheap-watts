@@ -36,6 +36,8 @@ class AppState(BaseModel):
     last_run_dry_run: bool | None = None
     last_deye_schedule: list[TouSlotRecord] = Field(default_factory=list)
     last_deye_updated_at: datetime | None = None
+    deye_plan_horizon_end: datetime | None = None
+    deye_plan_solar_sufficient: bool | None = None
     last_error_notified_at: datetime | None = None
     vehicle_alerts: dict[str, VehicleAlertRecord] = Field(default_factory=dict)
 

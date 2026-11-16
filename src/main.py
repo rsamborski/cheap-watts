@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -28,7 +29,7 @@ from src.clients.pstryk import PstrykClient
 from src.clients.solar import SolarArray, SolarForecastClient
 from src.config import Settings, load_settings
 from src.engine.diff import diff_tou_schedules, evaluate_cycle_actions
-from src.engine.planner import plan_charging_schedule
+from src.engine.planner import plan_charging_schedule, should_replan_deye_schedule
 from src.logging_setup import setup_logging
 from src.models import TouSlot, VehicleStatus
 from src.notify.email import SmtpNotifier
@@ -328,7 +329,8 @@ def execute_run(
             modbus_factory=modbus_factory,
         ) as deye_client:
             inverter_status = deye_client.get_status()
-            plan = plan_charging_schedule(
+            tz = ZoneInfo(settings.timezone)
+            fresh_plan = plan_charging_schedule(
                 settings=settings,
                 inverter=inverter_status,
                 price_slots=price_slots,
@@ -336,6 +338,35 @@ def execute_run(
                 vehicles=vehicles,
                 now=current_time,
             )
+            replan_deye, deye_plan_reason = should_replan_deye_schedule(
+                fresh_plan=fresh_plan,
+                inverter=inverter_status,
+                price_slots=price_slots,
+                state=state,
+                effective_dry_run=effective_dry_run,
+                now=current_time,
+                tz=tz,
+            )
+            current_price_horizon = max((s.end for s in price_slots), default=None)
+            if replan_deye:
+                plan = fresh_plan.model_copy(
+                    update={"rationale": f"{fresh_plan.rationale}; Deye plan={deye_plan_reason}"}
+                )
+            else:
+                locked_slots = (
+                    [TouSlot.from_record(r) for r in state.last_deye_schedule]
+                    if len(state.last_deye_schedule) == 6
+                    else list(inverter_status.tou_slots)
+                )
+                plan = fresh_plan.model_copy(
+                    update={
+                        "target_tou_slots": locked_slots,
+                        "rationale": (
+                            f"{fresh_plan.rationale}; "
+                            f"Deye TOU sticky lock active ({deye_plan_reason})"
+                        ),
+                    }
+                )
 
             hardware_diff = diff_tou_schedules(
                 current_slots=inverter_status.tou_slots,
@@ -369,6 +400,8 @@ def execute_run(
                     "dry_run": effective_dry_run,
                     "solar_sufficient": plan.solar_sufficient,
                     "grid_deficit_kwh": plan.grid_deficit_kwh,
+                    "deye_replan": replan_deye,
+                    "deye_plan_reason": deye_plan_reason,
                     "deye_changed": effective_diff.has_changes,
                     "ev_alerts": len(decision.notifiable_ev_recommendations),
                 },
@@ -380,14 +413,17 @@ def execute_run(
                     dry_run=effective_dry_run,
                     enable_tou=True,
                 )
-                state.last_deye_schedule = [s.to_record() for s in plan.target_tou_slots]
                 state.last_deye_updated_at = current_time
             elif effective_dry_run and effective_diff.has_changes:
                 logger.info(
                     "Dry-run mode active: skipped Deye TOU write",
                     extra={"event": "deye_write_skipped_dry_run", "run_id": run_id},
                 )
+
+            if replan_deye:
                 state.last_deye_schedule = [s.to_record() for s in plan.target_tou_slots]
+                state.deye_plan_horizon_end = current_price_horizon
+                state.deye_plan_solar_sufficient = plan.solar_sufficient
 
         email_sent = False
         if decision.should_send_email:
@@ -466,6 +502,8 @@ def execute_status(settings: Settings) -> int:
     print(f"  State file:      {settings.state_file} (exists={settings.state_file.exists()})")
     print(f"  Last run at:     {state.last_run_at.isoformat() if state.last_run_at else 'never'}")
     print(f"  Last run status: {state.last_run_status or 'n/a'}")
+    horizon_str = state.deye_plan_horizon_end.isoformat() if state.deye_plan_horizon_end else "none"
+    print(f"  Deye plan horizon: {horizon_str}")
     print(f"  Missing config:  {', '.join(missing) if missing else 'none'}")
     return 0
 

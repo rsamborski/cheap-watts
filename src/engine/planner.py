@@ -18,6 +18,7 @@ from src.models import (
     TouSlot,
     VehicleStatus,
 )
+from src.state import AppState
 
 _DEFAULT_EV_GRID_HOURS = 3
 _DEFAULT_EV_SOLAR_HOURS = 4
@@ -132,14 +133,52 @@ def _select_cheap_ev_window(
     )
 
 
+def _clock_intervals_for_slot(
+    slot_start: datetime,
+    slot_end: datetime,
+    tz: ZoneInfo,
+) -> list[tuple[int, int]]:
+    local_start = slot_start.astimezone(tz)
+    local_end = slot_end.astimezone(tz)
+    s_min = _minutes_since_midnight(local_start)
+    e_min = _minutes_since_midnight(local_end)
+    if e_min == 0 and local_end > local_start:
+        e_min = _MINUTES_PER_DAY
+
+    if s_min < e_min:
+        return [(s_min, e_min)]
+    if s_min > e_min:
+        intervals = [(s_min, _MINUTES_PER_DAY)]
+        if e_min > 0:
+            intervals.append((0, e_min))
+        return intervals
+    return []
+
+
+def _window_clock_intervals(slots: Sequence[PriceSlot], tz: ZoneInfo) -> list[tuple[int, int]]:
+    intervals: list[tuple[int, int]] = []
+    for slot in slots:
+        intervals.extend(_clock_intervals_for_slot(slot.start, slot.end, tz))
+    return intervals
+
+
+def _intervals_overlap(
+    left: Sequence[tuple[int, int]],
+    right: Sequence[tuple[int, int]],
+) -> bool:
+    return any(max(a0, b0) < min(a1, b1) for a0, a1 in left for b0, b1 in right)
+
+
 def _select_deye_windows(
     candidates: Sequence[PriceSlot],
     hours_needed: int,
+    tz: ZoneInfo | None = None,
 ) -> list[list[PriceSlot]]:
     """Select up to 2 contiguous windows of `hours_needed` total hours at minimum cost."""
     if hours_needed <= 0 or not candidates:
         return []
 
+    zone = tz or ZoneInfo("Europe/Warsaw")
     runs = _contiguous_runs(candidates)
     slices_by_len: dict[int, list[tuple[float, list[PriceSlot]]]] = {}
     for run in runs:
@@ -168,8 +207,12 @@ def _select_deye_windows(
                 for cost1, sl1 in slices_by_len.get(len1, ()):
                     end1 = sl1[-1].end
                     t1 = sl1[0].start.timestamp()
+                    iv1 = _window_clock_intervals(sl1, zone)
                     for cost2, sl2 in slices_by_len.get(len2, ()):
                         if sl2[0].start <= end1:
+                            continue
+                        iv2 = _window_clock_intervals(sl2, zone)
+                        if _intervals_overlap(iv1, iv2):
                             continue
                         key_2 = (
                             round(cost1 + cost2, 6),
@@ -226,19 +269,7 @@ def map_windows_to_tou_slots(
     raw_active: list[tuple[int, int]] = []
     for window in windows:
         for slot in window:
-            local_start = slot.start.astimezone(tz)
-            local_end = slot.end.astimezone(tz)
-            s_min = _minutes_since_midnight(local_start)
-            e_min = _minutes_since_midnight(local_end)
-            if e_min == 0 and local_end > local_start:
-                e_min = _MINUTES_PER_DAY
-
-            if s_min < e_min:
-                raw_active.append((s_min, e_min))
-            elif s_min > e_min:
-                raw_active.append((s_min, _MINUTES_PER_DAY))
-                if e_min > 0:
-                    raw_active.append((0, e_min))
+            raw_active.extend(_clock_intervals_for_slot(slot.start, slot.end, tz))
 
     if not raw_active:
         return build_idle_tou_slots(min_soc=min_soc)
@@ -353,7 +384,8 @@ def plan_charging_schedule(
     """Generate a single-cycle optimization plan for EV alerts and Deye TOU slots."""
     tz = ZoneInfo(settings.timezone)
     current_time = (now or datetime.now(tz=UTC)).astimezone(tz)
-    horizon_end = current_time + timedelta(hours=24)
+    current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
+    horizon_end = current_hour_start + timedelta(hours=24)
 
     upcoming_slots = sorted(
         (
@@ -488,7 +520,11 @@ def plan_charging_schedule(
             for s in upcoming_slots
             if s.start not in blocked_set and (post_ev_cutoff is None or s.start >= post_ev_cutoff)
         ]
-        selected_windows = _select_deye_windows(deye_candidates, hours_needed=deye_hours_needed)
+        selected_windows = _select_deye_windows(
+            deye_candidates,
+            hours_needed=deye_hours_needed,
+            tz=tz,
+        )
         if selected_windows:
             win_labels = [_format_window(w, tz) for w in selected_windows]
             rationale_parts.append(
@@ -519,3 +555,145 @@ def plan_charging_schedule(
         target_tou_slots=target_tou_slots,
         rationale="; ".join(rationale_parts),
     )
+
+
+def _hhmm_to_minutes(hhmm: str) -> int:
+    hh_str, mm_str = hhmm.strip().split(":", maxsplit=1)
+    return int(hh_str) * 60 + int(mm_str)
+
+
+def _tou_active_intervals(slots: Sequence[TouSlot]) -> list[tuple[int, int]]:
+    """Return sorted, merged `[0, 1440)` minute intervals where `grid_charge` is ON."""
+    raw: list[tuple[int, int]] = []
+    for slot in sorted(slots, key=lambda s: s.slot_index):
+        if not slot.grid_charge:
+            continue
+        s_min = _hhmm_to_minutes(slot.start_time)
+        e_min = _hhmm_to_minutes(slot.end_time)
+        if e_min == 0 and s_min > 0:
+            e_min = _MINUTES_PER_DAY
+        if s_min < e_min:
+            raw.append((s_min, e_min))
+        elif s_min > e_min:
+            raw.append((s_min, _MINUTES_PER_DAY))
+            if e_min > 0:
+                raw.append((0, e_min))
+
+    if not raw:
+        return []
+    raw.sort()
+    merged: list[tuple[int, int]] = [raw[0]]
+    for s_min, e_min in raw[1:]:
+        prev_s, prev_e = merged[-1]
+        if s_min <= prev_e:
+            merged[-1] = (prev_s, max(prev_e, e_min))
+        else:
+            merged.append((s_min, e_min))
+    return merged
+
+
+def is_tou_grid_charging_at(slots: Sequence[TouSlot], local_dt: datetime) -> bool:
+    """Return True if `local_dt` falls inside an active `grid_charge=ON` TOU window."""
+    minute = _minutes_since_midnight(local_dt)
+    return any(s_min <= minute < e_min for s_min, e_min in _tou_active_intervals(slots))
+
+
+def ev_conflicts_with_locked_tou(
+    fresh_plan: ChargingPlan,
+    locked_slots: Sequence[TouSlot],
+    price_slots: Sequence[PriceSlot],
+    now: datetime,
+    tz: ZoneInfo,
+) -> bool:
+    """Return True if active EV charging or EV reservations conflict with `locked_slots`."""
+    if not fresh_plan.ev_actively_charging and not fresh_plan.ev_recommendations:
+        return False
+
+    active_tou = _tou_active_intervals(locked_slots)
+    if not active_tou:
+        return False
+
+    ev_intervals: list[tuple[int, int]] = []
+    for hour_start in fresh_plan.blocked_ev_hours:
+        ev_intervals.extend(
+            _clock_intervals_for_slot(hour_start, hour_start + timedelta(hours=1), tz)
+        )
+    if not ev_intervals and fresh_plan.ev_actively_charging:
+        local_now = now.astimezone(tz)
+        ev_intervals.extend(
+            _clock_intervals_for_slot(local_now, local_now + timedelta(hours=1), tz)
+        )
+
+    if _intervals_overlap(ev_intervals, active_tou):
+        return True
+
+    if not fresh_plan.solar_sufficient and fresh_plan.blocked_ev_hours:
+        post_ev_cutoff = max(
+            dt.astimezone(tz) + timedelta(hours=1) for dt in fresh_plan.blocked_ev_hours
+        )
+        local_now = now.astimezone(tz)
+        horizon_end = local_now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=24)
+        for slot in price_slots:
+            s_local = _localize_slot(slot, tz)
+            if (
+                s_local.end > local_now
+                and s_local.start < post_ev_cutoff
+                and s_local.start < horizon_end
+                and _intervals_overlap(
+                    _clock_intervals_for_slot(s_local.start, s_local.end, tz), active_tou
+                )
+            ):
+                return True
+
+    return False
+
+
+def should_replan_deye_schedule(
+    fresh_plan: ChargingPlan,
+    inverter: InverterStatus,
+    price_slots: Sequence[PriceSlot],
+    state: AppState,
+    effective_dry_run: bool,
+    now: datetime,
+    tz: ZoneInfo,
+) -> tuple[bool, str]:
+    """Decide whether Deye TOU slots may be updated or remain locked for the current horizon."""
+    local_now = now.astimezone(tz)
+    current_price_horizon = max((s.end.astimezone(tz) for s in price_slots), default=None)
+    has_persisted = len(state.last_deye_schedule) == 6
+    locked_slots: list[TouSlot] | None
+    if has_persisted:
+        locked_slots = [TouSlot.from_record(r) for r in state.last_deye_schedule]
+    elif len(inverter.tou_slots) == 6 and inverter.tou_enabled:
+        locked_slots = list(inverter.tou_slots)
+    else:
+        locked_slots = None
+
+    if locked_slots is None:
+        return True, "initial_plan"
+
+    if state.last_run_dry_run is True and not effective_dry_run:
+        return True, "dry_run_to_live_transition"
+
+    if ev_conflicts_with_locked_tou(fresh_plan, locked_slots, price_slots, now, tz):
+        return True, "ev_conflict_override"
+
+    if is_tou_grid_charging_at(locked_slots, local_now):
+        return False, "active_charging_window_locked"
+
+    if not has_persisted or state.deye_plan_horizon_end is None:
+        return True, "initial_plan"
+
+    prev_horizon = state.deye_plan_horizon_end.astimezone(tz)
+    if current_price_horizon is not None and current_price_horizon > prev_horizon:
+        return True, "new_tariff_horizon"
+    if local_now >= prev_horizon:
+        return True, "tariff_horizon_expired"
+
+    if (
+        state.deye_plan_solar_sufficient is not None
+        and state.deye_plan_solar_sufficient != fresh_plan.solar_sufficient
+    ):
+        return True, "solar_regime_changed"
+
+    return False, "sticky_daily_plan_locked"
