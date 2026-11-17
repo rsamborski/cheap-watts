@@ -270,5 +270,9 @@ Thumbs.db
 # pstryk-pilot runtime logs & local state
 logs/
 data/
+*.db
+*.sqlite
+*.sqlite3
+*cardata_tokens*.json
 
 

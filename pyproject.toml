@@ -5,12 +5,29 @@ description = "Headless Home Energy Management System optimizing Deye battery st
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
+authors = [{ name = "Remigiusz Samborski" }]
+keywords = ["hems", "deye", "solarman", "pstryk", "ev-charging", "solar", "modbus"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Home Automation",
+]
 dependencies = [
     "httpx>=0.28.1",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
     "pysolarmanv5>=3.0.6",
 ]
+
+[project.urls]
+Homepage = "https://github.com/rsamborski/pstryk-pilot"
+Repository = "https://github.com/rsamborski/pstryk-pilot"
+Issues = "https://github.com/rsamborski/pstryk-pilot/issues"
 
 [project.scripts]
 pstryk-pilot = "src.main:app_main"

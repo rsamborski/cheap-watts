@@ -297,7 +297,7 @@ def _parse_json_any(response: httpx.Response, service: str) -> dict[str, Any] | 
 
 
 class CarDataClient:
-    """Read-only BMW Group CarData client supporting BMW and MINI."""
+    """Read-only BMW Group CarData client supporting BMW and MINI vehicles."""
 
     def __init__(
         self,

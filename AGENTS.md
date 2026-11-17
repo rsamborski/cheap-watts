@@ -5,7 +5,7 @@ This file defines mandatory development conventions and quality gates for contri
 ---
 
 ## 1. Local Development Environment: WSL + `uv`
-- **Native WSL Environment:** Antigravity and VS Code run directly inside WSL in the project workspace (repository root), so execute all shell commands (`uv`, `pytest`, `ruff`, `black`, `git`, CLI runs) directly in the shell without `wsl` wrappers or `/mnt/c/` paths.
+- **Native Linux / WSL Environment:** Execute all shell commands (`uv`, `pytest`, `ruff`, `black`, `git`, CLI runs) directly from the repository root inside a native Linux/WSL/macOS shell without `wsl` wrappers or `/mnt/c/` paths.
 - **Package & Python Management:** Use `uv` exclusively (Python `>=3.12`, pinned in `.python-version` and `uv.lock`). Do not use global `pip` or Windows-side virtual environments.
   - Install / sync dependencies: `uv sync`
   - Run the CLI locally: `uv run pstryk-pilot run --dry-run`

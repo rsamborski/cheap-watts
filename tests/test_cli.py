@@ -184,5 +184,5 @@ def test_cli_cardata_auth_shared_client_id_and_subsequent_probe(
     _clear_pilot_loggers()
     out_fail = capsys.readouterr().out
     assert rc_cli_fail == 1
-    assert "[SKIP] MINI" in out_fail
+    assert "[SKIP] MINI:" in out_fail
     assert "[FAIL] CarData authorization failed" in out_fail

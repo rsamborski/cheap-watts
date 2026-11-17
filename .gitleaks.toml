@@ -1,7 +1,5 @@
 # ============================================================
-# .gitleaks.toml — Gitleaks Custom Configuration
-# Tailored for hackathon projects using Google Cloud, Firebase,
-# Gemini, and common LLM/SaaS providers.
+# .gitleaks.toml — Gitleaks Secret Scanning Configuration for pstryk-pilot
 # ============================================================
 
 # Extend the built-in default ruleset (catches AWS, Stripe, GitHub, etc.)
@@ -41,6 +39,13 @@ description = "Detects AWS access keys (AKIA prefix)"
 regex = '''AKIA[0-9A-Z]{16}'''
 keywords = ["AKIA"]
 
+# Rule: Pstryk API Token (sk- prefix)
+[[rules]]
+id = "pstryk-api-key"
+description = "Detects Pstryk personal API tokens (sk- prefix)"
+regex = '''\bsk-[A-Za-z0-9_\-]{20,}\b'''
+keywords = ["sk-"]
+
 # Rule: GitHub Personal Access Token (ghp_ prefix)
 [[rules]]
 id = "github-pat-custom"
@@ -52,18 +57,11 @@ keywords = ["ghp_"]
 # ALLOWLISTS — paths and patterns to ignore
 # ============================================================
 [[allowlists]]
-description = "Ignore safe files and directories"
+description = "Ignore gitleaks config file itself"
 paths = [
     '''\.gitleaks\.toml$''',
-    '''\.env\.example$''',
-    '''\.env\.template$''',
-    '''package-lock\.json$''',
-    '''yarn\.lock$''',
-    '''tests/test_secrets/.*''',
-    '''WALKTHROUGH\.md$''',
-    '''README\.md$'''
 ]
 
 [[allowlists]]
 description = "Ignore known example/placeholder strings"
-stopwords = ["EXAMPLE", "example", "placeholder", "your_", "xxxx", "test-api-key", "YOUR_"]
+stopwords = ["EXAMPLE", "example", "placeholder", "your_", "your-", "xxxx", "test-api-key", "YOUR_"]

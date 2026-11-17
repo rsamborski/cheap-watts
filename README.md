@@ -153,10 +153,10 @@ Every merge to `main` runs all CI checks and publishes `ghcr.io/rsamborski/pstry
    ```
    Copy `.env.example` into `/opt/pstryk-pilot/.env` and fill in your credentials/settings.
 
-2. **Authenticate Docker to GHCR (one-time if the package is private):**
+2. **Pull or authenticate Docker to GHCR:**
+   Public GHCR images can be pulled directly without authentication (`docker pull ghcr.io/rsamborski/pstryk-pilot:latest`). If you publish to a private package/fork, log in first with a `read:packages` Personal Access Token:
    ```bash
-   docker login ghcr.io -u rsamborski
-   # Paste a GitHub Personal Access Token with read:packages scope
+   docker login ghcr.io -u <github-username>
    docker pull ghcr.io/rsamborski/pstryk-pilot:latest
    ```
 
@@ -221,3 +221,11 @@ uv run ruff check --fix src tests
 uv run pytest --cov=src --cov-report=term-missing
 uv run pre-commit run --all-files
 ```
+
+---
+
+## ⚠️ Hardware Safety Disclaimer & License
+
+`pstryk-pilot` reads telemetry and writes Time-of-Use (TOU) Modbus holding registers (`146, 148..153, 166..177`) to grid-tied hybrid inverters. Before enabling live writes, verify Modbus register compatibility with your exact inverter firmware and validate schedules using `--dry-run`. Provided "AS IS" without warranty — you operate inverter control automation at your own risk.
+
+Licensed under the [Apache License 2.0](LICENSE).

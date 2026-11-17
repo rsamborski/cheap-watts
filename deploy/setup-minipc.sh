@@ -31,7 +31,7 @@ run_priv chown "${HOST_UID}:${HOST_GID}" "${INSTALL_DIR}"
 # Container runs as UID/GID 1000 (pilot) and reads/writes data/ and logs/.
 run_priv chown -R "${CONTAINER_UID}:${CONTAINER_GID}" "${INSTALL_DIR}/data" "${INSTALL_DIR}/logs"
 run_priv chmod 700 "${INSTALL_DIR}/data"
-run_priv chmod 755 "${INSTALL_DIR}/logs"
+run_priv chmod 750 "${INSTALL_DIR}/logs"
 
 if [[ -f "${INSTALL_DIR}/data/cardata_tokens.json" ]]; then
   run_priv chown "${CONTAINER_UID}:${CONTAINER_GID}" "${INSTALL_DIR}/data/cardata_tokens.json"
@@ -55,7 +55,7 @@ else
   PULL_OK=0
   echo "Warning: failed to pull ${IMAGE}." >&2
   echo "If the GHCR package is private, log in first with a read:packages PAT:" >&2
-  echo "  docker login ghcr.io -u rsamborski" >&2
+  echo "  docker login ghcr.io -u <github-username>" >&2
 fi
 
 cat <<EOF
@@ -70,7 +70,7 @@ Next steps:
   1. $([[ "${ENV_CREATED}" -eq 1 ]] && echo "Populate ${INSTALL_DIR}/.env from .env.example before running." || echo "Verify ${INSTALL_DIR}/.env is up to date.")
 $(if [[ "${PULL_OK}" -eq 0 ]]; then
   echo "  2. Authenticate Docker to GHCR and pull the image:"
-  echo "       docker login ghcr.io -u rsamborski"
+  echo "       docker login ghcr.io -u <github-username>"
   echo "       docker pull ${IMAGE}"
 fi)
   3. Provision BMW CarData tokens (skip if data/cardata_tokens.json was copied):
