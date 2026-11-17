@@ -8,6 +8,8 @@
 
 A headless Home Energy Management System (HEMS) written in Python 3.12+ (`uv`), invoked periodically via `cron` to optimize **Deye SUN-10K-SG04LP3-EU** home battery charging and **BMW / MINI** EV charging recommendations against **Pstryk** dynamic hourly tariffs and **Open-Meteo** solar forecasts.
 
+![cheap-watts High-Level Architecture](docs/assets/architecture-whiteboard.png)
+
 ---
 
 ## ✨ Key Capabilities
