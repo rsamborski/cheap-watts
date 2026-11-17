@@ -20,10 +20,10 @@ from src.state import StateStore
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def _clear_pilot_loggers() -> None:
-    for handler in list(logging.getLogger("pstryk_pilot").handlers):
+def _clear_app_loggers() -> None:
+    for handler in list(logging.getLogger("cheap_watts").handlers):
         handler.close()
-    logging.getLogger("pstryk_pilot").handlers.clear()
+    logging.getLogger("cheap_watts").handlers.clear()
 
 
 def test_execute_run_end_to_end_dry_run_deduplication_then_live_write_and_error(
@@ -115,7 +115,7 @@ def test_execute_run_end_to_end_dry_run_deduplication_then_live_write_and_error(
         deye_logger_serial="2700012345",
         bmw_cardata_client_id="example-bmw-client",
         smtp_host="smtp.example.com",
-        smtp_from_email="pilot@example.com",
+        smtp_from_email="alerts@example.com",
         smtp_to_email="owner@example.com",
     )
 
@@ -130,11 +130,11 @@ def test_execute_run_end_to_end_dry_run_deduplication_then_live_write_and_error(
         smtp_factory=FakeSmtp,
         now=ref_now,
     )
-    _clear_pilot_loggers()
+    _clear_app_loggers()
     assert rc_dry_1 == 0
     assert modbus_writes == []  # Strict dry-run invariant!
     assert len(sent_emails) == 1
-    assert str(sent_emails[0]["Subject"]).startswith("[DRY-RUN] pstryk-pilot:")
+    assert str(sent_emails[0]["Subject"]).startswith("[DRY-RUN] cheap-watts:")
 
     # 2. Second --dry-run cycle 15m later with identical inputs -> 0 writes, 0 duplicate emails!
     rc_dry_2 = execute_run(
@@ -145,7 +145,7 @@ def test_execute_run_end_to_end_dry_run_deduplication_then_live_write_and_error(
         smtp_factory=FakeSmtp,
         now=ref_now + timedelta(minutes=15),
     )
-    _clear_pilot_loggers()
+    _clear_app_loggers()
     assert rc_dry_2 == 0
     assert modbus_writes == []
     assert len(sent_emails) == 1
@@ -159,7 +159,7 @@ def test_execute_run_end_to_end_dry_run_deduplication_then_live_write_and_error(
         smtp_factory=FakeSmtp,
         now=ref_now + timedelta(minutes=30),
     )
-    _clear_pilot_loggers()
+    _clear_app_loggers()
     assert rc_live == 0
     assert len(modbus_writes) == 2  # Registers 148..153 and 166..177 written!
     assert len(sent_emails) == 2
@@ -178,7 +178,7 @@ def test_execute_run_end_to_end_dry_run_deduplication_then_live_write_and_error(
         smtp_factory=FakeSmtp,
         now=ref_now + timedelta(minutes=45),
     )
-    _clear_pilot_loggers()
+    _clear_app_loggers()
     assert rc_degraded == 0
     assert len(sent_emails) == 3
 
@@ -194,7 +194,7 @@ def test_execute_run_end_to_end_dry_run_deduplication_then_live_write_and_error(
         smtp_factory=FakeSmtp,
         now=ref_now + timedelta(hours=1),
     )
-    _clear_pilot_loggers()
+    _clear_app_loggers()
     assert rc_err == 1
     assert len(sent_emails) == 4
     assert "Optimization cycle failed" in str(sent_emails[3]["Subject"])
@@ -373,7 +373,7 @@ def test_sticky_daily_plan_prevents_mid_charge_overwrite_until_new_tariffs_or_ev
         deye_logger_serial="2700012345",
         bmw_cardata_client_id="example-bmw-client",
         smtp_host="smtp.example.com",
-        smtp_from_email="pilot@example.com",
+        smtp_from_email="alerts@example.com",
         smtp_to_email="owner@example.com",
     )
 
@@ -389,7 +389,7 @@ def test_sticky_daily_plan_prevents_mid_charge_overwrite_until_new_tariffs_or_ev
         )
         == 0
     )
-    _clear_pilot_loggers()
+    _clear_app_loggers()
     assert len(modbus_writes) == 2
     assert len(sent_emails) == 1
     saved_boundaries = list(tou_regs[2:8])
@@ -409,7 +409,7 @@ def test_sticky_daily_plan_prevents_mid_charge_overwrite_until_new_tariffs_or_ev
         )
         == 0
     )
-    _clear_pilot_loggers()
+    _clear_app_loggers()
     assert len(modbus_writes) == 2
     assert len(sent_emails) == 1
     assert tou_regs[2:8] == saved_boundaries
@@ -428,7 +428,7 @@ def test_sticky_daily_plan_prevents_mid_charge_overwrite_until_new_tariffs_or_ev
         )
         == 0
     )
-    _clear_pilot_loggers()
+    _clear_app_loggers()
     assert len(modbus_writes) == 2
     assert len(sent_emails) == 1
 
@@ -446,7 +446,7 @@ def test_sticky_daily_plan_prevents_mid_charge_overwrite_until_new_tariffs_or_ev
         )
         == 0
     )
-    _clear_pilot_loggers()
+    _clear_app_loggers()
     assert len(modbus_writes) == 4
     assert len(sent_emails) == 2
 
@@ -463,7 +463,7 @@ def test_sticky_daily_plan_prevents_mid_charge_overwrite_until_new_tariffs_or_ev
         )
         == 0
     )
-    _clear_pilot_loggers()
+    _clear_app_loggers()
     assert len(modbus_writes) == 6
     assert len(sent_emails) == 3
 

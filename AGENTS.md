@@ -1,6 +1,6 @@
-# 🤖 `pstryk-pilot` — Agent & Developer Guidelines
+# 🤖 `cheap-watts` — Agent & Developer Guidelines
 
-This file defines mandatory development conventions and quality gates for contributors and AI coding agents working on `pstryk-pilot`.
+This file defines mandatory development conventions and quality gates for contributors and AI coding agents working on `cheap-watts`.
 
 ---
 
@@ -8,7 +8,7 @@ This file defines mandatory development conventions and quality gates for contri
 - **Native Linux / WSL Environment:** Execute all shell commands (`uv`, `pytest`, `ruff`, `black`, `git`, CLI runs) directly from the repository root inside a native Linux/WSL/macOS shell without `wsl` wrappers or `/mnt/c/` paths.
 - **Package & Python Management:** Use `uv` exclusively (Python `>=3.12`, pinned in `.python-version` and `uv.lock`). Do not use global `pip` or Windows-side virtual environments.
   - Install / sync dependencies: `uv sync`
-  - Run the CLI locally: `uv run pstryk-pilot run --dry-run`
+  - Run the CLI locally: `uv run cheap-watts run --dry-run`
 
 ---
 
@@ -52,4 +52,4 @@ Any changes that are smaller or iterative are still going to be checked by:
 - **Protected `main` Branch:** `main` is protected on GitHub — never commit or push directly to `main`.
 - **Branch per Change:** Create a descriptive branch off up-to-date `main` for every feature, bug fix, refactor, or documentation update (e.g., `feat/<topic>`, `fix/<topic>`, `chore/<topic>`, `docs/<topic>`).
 - **Pre-PR Verification:** Run `uv run black src tests`, `uv run ruff check --fix src tests`, `uv run pytest --cov=src --cov-report=term-missing`, and `uv run pre-commit run --all-files` locally before pushing your branch and opening a Pull Request targeting `main`.
-- **Automated GHCR Publishing:** Merging an approved Pull Request into `main` (after all CI status checks pass) automatically builds and publishes `ghcr.io/rsamborski/pstryk-pilot:latest` and `:sha-<short_sha>` via `.github/workflows/docker-publish.yml`.
+- **Automated GHCR Publishing:** Merging an approved Pull Request into `main` (after all CI status checks pass) automatically builds and publishes `ghcr.io/rsamborski/cheap-watts:latest` and `:sha-<short_sha>` via `.github/workflows/docker-publish.yml`.

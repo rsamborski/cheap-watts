@@ -19,7 +19,7 @@ from src.clients.pstryk import PstrykClient
 from src.clients.solar import SolarArray, SolarForecastClient
 from src.config import Settings
 
-logger = logging.getLogger("pstryk_pilot.probe")
+logger = logging.getLogger("cheap_watts.probe")
 
 ServiceName = Literal["pstryk", "solar", "deye", "cardata"]
 ProbeTarget = Literal["all", "pstryk", "solar", "deye", "cardata"]
@@ -329,11 +329,11 @@ def probe_cardata(
         has_client_id = any(bool(v.client_id) for v in vehicles)
         headline = (
             "Client ID configured, awaiting browser authorization "
-            "(run: uv run pstryk-pilot cardata-auth)"
+            "(run: uv run cheap-watts cardata-auth)"
             if has_client_id
             else (
                 "Not configured (set BMW_CARDATA_CLIENT_ID / MINI_CARDATA_CLIENT_ID in .env, "
-                "then run uv run pstryk-pilot cardata-auth)"
+                "then run uv run cheap-watts cardata-auth)"
             )
         )
         return ProbeResult(
@@ -447,7 +447,7 @@ def format_probe_report(results: Sequence[ProbeResult], timezone: str) -> str:
         "skipped": "[SKIP]",
         "failed": "[FAIL]",
     }
-    lines = [f"pstryk-pilot v{__version__} — Read-Only API Probe (timezone: {timezone})"]
+    lines = [f"cheap-watts v{__version__} — Read-Only API Probe (timezone: {timezone})"]
     for res in results:
         lines.append(f"  {badge_map[res.status]} {res.service:<8} {res.headline}")
         for detail in res.details:

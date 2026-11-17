@@ -15,7 +15,7 @@ from pydantic import SecretStr
 from src.clients.errors import ApiClientError, PayloadParseError, parse_json_response
 from src.models import PriceSlot
 
-logger = logging.getLogger("pstryk_pilot.clients.pstryk")
+logger = logging.getLogger("cheap_watts.clients.pstryk")
 
 _UNIFIED_METRICS_PATH = "/integrations/meter-data/unified-metrics/"
 

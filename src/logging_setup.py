@@ -69,12 +69,12 @@ class PlainTextLogFormatter(logging.Formatter):
 def setup_logging(
     log_dir: Path,
     level: str = "INFO",
-    log_filename: str = "pstryk-pilot.log",
+    log_filename: str = "cheap-watts.log",
     max_bytes: int = 5 * 1024 * 1024,
     backup_count: int = 5,
     tz_name: str | None = None,
 ) -> Path:
-    """Configure console + rotating plain-text file logging for pstryk_pilot.
+    """Configure console + rotating plain-text file logging for cheap_watts.
 
     When ``tz_name`` is provided (e.g. ``Europe/Warsaw``), timestamps use that timezone;
     otherwise the host OS local timezone is used.
@@ -83,7 +83,7 @@ def setup_logging(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_filename
 
-    logger = logging.getLogger("pstryk_pilot")
+    logger = logging.getLogger("cheap_watts")
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
     logger.propagate = False
 

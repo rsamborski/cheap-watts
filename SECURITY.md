@@ -13,7 +13,7 @@ Security updates are applied to the latest release on `main`:
 Please **do not** report security vulnerabilities through public GitHub issues.
 
 Instead, report vulnerabilities privately via GitHub Security Advisories:
-- [Open a private security advisory](https://github.com/rsamborski/pstryk-pilot/security/advisories/new)
+- [Open a private security advisory](https://github.com/rsamborski/cheap-watts/security/advisories/new)
 
 Please include a clear description of the issue, steps to reproduce, and potential impact. You can expect an acknowledgment within a few days and coordinated disclosure once a fix is ready.
 
@@ -24,4 +24,4 @@ Please include a clear description of the issue, steps to reproduce, and potenti
 
 ## Inverter Hardware Safety
 
-`pstryk-pilot` writes Time-of-Use (TOU) Modbus holding registers (`146, 148..153, 166..177`) directly to grid-tied hybrid inverters over local Solarman V5 TCP (`:8899`). Always verify register compatibility with your inverter model/firmware and validate schedule behavior using `--dry-run` before enabling live writes.
+`cheap-watts` writes Time-of-Use (TOU) Modbus holding registers (`146, 148..153, 166..177`) directly to grid-tied hybrid inverters over local Solarman V5 TCP (`:8899`). Always verify register compatibility with your inverter model/firmware and validate schedule behavior using `--dry-run` before enabling live writes.

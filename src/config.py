@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Typed configuration for pstryk-pilot."""
+    """Typed configuration for cheap-watts."""
 
     model_config = SettingsConfigDict(
         env_file=".env",

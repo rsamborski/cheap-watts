@@ -193,9 +193,9 @@ def test_cli_probe_command_dispatches_and_sets_exit_code(
 
     # Unconfigured single-service probe -> skipped -> exit code 0
     exit_ok = main(["--env-file", str(env_file), "probe", "--service", "solar"])
-    for handler in list(logging.getLogger("pstryk_pilot").handlers):
+    for handler in list(logging.getLogger("cheap_watts").handlers):
         handler.close()
-    logging.getLogger("pstryk_pilot").handlers.clear()
+    logging.getLogger("cheap_watts").handlers.clear()
 
     captured = capsys.readouterr()
     assert exit_ok == 0
@@ -215,9 +215,9 @@ def test_cli_probe_command_dispatches_and_sets_exit_code(
     ):
         exit_fail = main(["--env-file", str(env_file), "probe", "-s", "pstryk"])
 
-    for handler in list(logging.getLogger("pstryk_pilot").handlers):
+    for handler in list(logging.getLogger("cheap_watts").handlers):
         handler.close()
-    logging.getLogger("pstryk_pilot").handlers.clear()
+    logging.getLogger("cheap_watts").handlers.clear()
 
     captured_fail = capsys.readouterr()
     assert exit_fail == 1

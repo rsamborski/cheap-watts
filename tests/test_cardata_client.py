@@ -228,14 +228,14 @@ def test_device_code_error_branches() -> None:
 
 
 def test_container_provisioning_reuse_fallback_and_brand_vin_discovery() -> None:
-    # 1. Reuse existing ACTIVE pstryk-pilot container from root JSON array
+    # 1. Reuse existing ACTIVE cheap-watts container from root JSON array
     with CarDataClient(
         transport=httpx.MockTransport(
             lambda _r: httpx.Response(
                 200,
                 json=[
                     {"containerId": "OTHER1", "name": "other", "state": "ACTIVE"},
-                    {"containerId": "CONT0000EXAMPLE1", "name": "pstryk-pilot", "state": "ACTIVE"},
+                    {"containerId": "CONT0000EXAMPLE1", "name": "cheap-watts", "state": "ACTIVE"},
                 ],
             )
         )
@@ -321,7 +321,7 @@ def test_token_store_rotation_persistence_and_auto_container_recovery(tmp_path: 
                     "containers": [
                         {
                             "containerId": "CONT0000EXAMPLE9",
-                            "name": "pstryk-pilot",
+                            "name": "cheap-watts",
                             "state": "ACTIVE",
                         }
                     ]

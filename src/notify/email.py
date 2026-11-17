@@ -15,7 +15,7 @@ from src.config import Settings
 from src.engine.diff import CycleDecision
 from src.models import ChargingPlan, InverterStatus
 
-logger = logging.getLogger("pstryk_pilot.notify.email")
+logger = logging.getLogger("cheap_watts.notify.email")
 
 
 def _parse_recipients(raw_to: str) -> list[str]:
@@ -48,7 +48,7 @@ def build_cycle_email(
     else:
         topic = f"EV charging recommended ({ev_names})"
 
-    subject = f"{decision.email_subject_prefix}pstryk-pilot: {topic}"
+    subject = f"{decision.email_subject_prefix}cheap-watts: {topic}"
 
     body_lines: list[str] = []
     if decision.dry_run:
@@ -59,7 +59,7 @@ def build_cycle_email(
 
     body_lines.extend(
         [
-            f"pstryk-pilot Optimization Summary ({generated_local})",
+            f"cheap-watts Optimization Summary ({generated_local})",
             "=" * 58,
             f"Deye Battery SoC:   {inverter.battery_soc}% (PV now: {inverter.pv_power_w:.0f}W)",
             f"24h Expected PV:    {plan.expected_pv_kwh:.2f} kWh "
@@ -137,18 +137,18 @@ def build_failure_email(
         lines.append("")
     lines.extend(
         [
-            f"pstryk-pilot Cycle Failure ({ts})",
+            f"cheap-watts Cycle Failure ({ts})",
             "=" * 48,
             f"Run ID: {run_id}",
             f"Error:  {error_summary}",
             "",
-            "Check logs/pstryk-pilot.log for the full traceback.",
+            "Check logs/cheap-watts.log for the full traceback.",
         ]
     )
 
     recipients = _parse_recipients(to_email)
     msg = EmailMessage()
-    msg["Subject"] = f"{prefix}pstryk-pilot: Optimization cycle failed (run {run_id})"
+    msg["Subject"] = f"{prefix}cheap-watts: Optimization cycle failed (run {run_id})"
     msg["From"] = from_email.strip()
     msg["To"] = ", ".join(recipients)
     msg.set_content("\n".join(lines) + "\n")
@@ -210,7 +210,7 @@ class SmtpNotifier:
 
         self._deliver(msg)
         logger.info(
-            "Sent pstryk-pilot notification email",
+            "Sent cheap-watts notification email",
             extra={
                 "event": "smtp_email_sent",
                 "dry_run": decision.dry_run,

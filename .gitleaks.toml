@@ -1,5 +1,5 @@
 # ============================================================
-# .gitleaks.toml — Gitleaks Secret Scanning Configuration for pstryk-pilot
+# .gitleaks.toml — Gitleaks Secret Scanning Configuration for cheap-watts
 # ============================================================
 
 # Extend the built-in default ruleset (catches AWS, Stripe, GitHub, etc.)

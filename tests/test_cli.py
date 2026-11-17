@@ -18,10 +18,10 @@ from src.state import StateStore
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def _clear_pilot_loggers() -> None:
-    for handler in list(logging.getLogger("pstryk_pilot").handlers):
+def _clear_app_loggers() -> None:
+    for handler in list(logging.getLogger("cheap_watts").handlers):
         handler.close()
-    logging.getLogger("pstryk_pilot").handlers.clear()
+    logging.getLogger("cheap_watts").handlers.clear()
 
 
 def test_cli_run_dry_run_persists_state_and_logs(
@@ -37,13 +37,13 @@ def test_cli_run_dry_run_persists_state_and_logs(
     )
 
     exit_code = main(["--env-file", str(env_file), "run", "--dry-run"])
-    _clear_pilot_loggers()
+    _clear_app_loggers()
 
     assert exit_code == 0
     state = StateStore(state_file).load()
     assert state.last_run_status == "ok"
     assert state.last_run_dry_run is True
-    assert (log_dir / "pstryk-pilot.log").exists()
+    assert (log_dir / "cheap-watts.log").exists()
 
     status_code = main(["--env-file", str(env_file), "status"])
     captured = capsys.readouterr()
@@ -65,7 +65,7 @@ def test_cli_cardata_auth_shared_client_id_and_subsequent_probe(
         cardata_tokens_file=tokens_file,
     )
     rc_missing = execute_cardata_auth(empty_settings, vehicle_target="bmw")
-    _clear_pilot_loggers()
+    _clear_app_loggers()
     out_missing = capsys.readouterr().out
     assert rc_missing == 1
     assert "BMW_CARDATA_CLIENT_ID" in out_missing
@@ -136,7 +136,7 @@ def test_cli_cardata_auth_shared_client_id_and_subsequent_probe(
         transport=mock_transport,
         sleep_fn=lambda _s: None,
     )
-    _clear_pilot_loggers()
+    _clear_app_loggers()
     out_ok = capsys.readouterr().out
 
     assert rc_ok == 0
@@ -181,7 +181,7 @@ def test_cli_cardata_auth_shared_client_id_and_subsequent_probe(
         ),
     ):
         rc_cli_fail = main(["--env-file", str(env_file), "cardata-auth"])
-    _clear_pilot_loggers()
+    _clear_app_loggers()
     out_fail = capsys.readouterr().out
     assert rc_cli_fail == 1
     assert "[SKIP] MINI:" in out_fail

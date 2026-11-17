@@ -8,7 +8,7 @@
 
 ## Goal
 
-Allow configuring one or more vacation date ranges so `pstryk-pilot` automatically enters a low-maintenance mode while the household is away: suppressing EV charging alerts and keeping the home battery at a minimal configured SoC.
+Allow configuring one or more vacation date ranges so `cheap-watts` automatically enters a low-maintenance mode while the household is away: suppressing EV charging alerts and keeping the home battery at a minimal configured SoC.
 
 ---
 
@@ -22,7 +22,7 @@ Allow configuring one or more vacation date ranges so `pstryk-pilot` automatical
 3. **Planner & Notifier Behavior in Vacation Mode:**
    - **Suppress EV notifications:** Do not send EV charging recommendation emails while in vacation mode.
    - **Minimal battery grid-charging:** Override the normal daily-usage / target SoC sizing so Deye grid-charging only maintains `VACATION_TARGET_SOC_PCT` (still respecting PV-first logic so solar charges for free if available).
-   - **Auditability:** Clearly log `[VACATION MODE]` in `logs/pstryk-pilot.log` and in any Deye schedule-change email.
+   - **Auditability:** Clearly log `[VACATION MODE]` in `logs/cheap-watts.log` and in any Deye schedule-change email.
 
 ---
 

@@ -1,4 +1,4 @@
-"""CLI entrypoint for pstryk-pilot."""
+"""CLI entrypoint for cheap-watts."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ VehicleTarget = Literal["all", "bmw", "mini"]
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line argument parser."""
     parser = argparse.ArgumentParser(
-        prog="pstryk-pilot",
+        prog="cheap-watts",
         description="Headless HEMS optimizing Deye battery and EV charging with Pstryk tariffs.",
     )
     parser.add_argument(
@@ -234,10 +234,10 @@ def execute_run(
         level=settings.log_level,
         tz_name=settings.timezone,
     )
-    logger = logging.getLogger("pstryk_pilot.main")
+    logger = logging.getLogger("cheap_watts.main")
 
     logger.info(
-        "Starting pstryk-pilot run",
+        "Starting cheap-watts run",
         extra={
             "event": "run_start",
             "run_id": run_id,
@@ -462,7 +462,7 @@ def execute_run(
         return 0
     except Exception as exc:
         logger.exception(
-            "Unhandled error during pstryk-pilot run",
+            "Unhandled error during cheap-watts run",
             extra={
                 "event": "run_error",
                 "run_id": run_id,
@@ -495,7 +495,7 @@ def execute_status(settings: Settings) -> int:
     state = store.load()
     missing = settings.missing_live_settings()
 
-    print(f"pstryk-pilot v{__version__}")
+    print(f"cheap-watts v{__version__}")
     print(f"  Dry-run (env):   {settings.dry_run}")
     print(f"  Timezone:        {settings.timezone}")
     print(f"  Log directory:   {settings.log_dir}")
@@ -533,7 +533,7 @@ def execute_cardata_auth(
         level=settings.log_level,
         tz_name=settings.timezone,
     )
-    logger = logging.getLogger("pstryk_pilot.main")
+    logger = logging.getLogger("cheap_watts.main")
 
     all_vehicles = build_cardata_vehicles(settings)
     selected = [
@@ -644,7 +644,7 @@ def execute_cardata_auth(
 
     print(
         f"\nSaved rotated tokens to {settings.cardata_tokens_file}.\n"
-        "Next step: uv run pstryk-pilot probe -s cardata"
+        "Next step: uv run cheap-watts probe -s cardata"
     )
     return 0
 

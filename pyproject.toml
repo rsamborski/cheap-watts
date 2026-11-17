@@ -1,5 +1,5 @@
 [project]
-name = "pstryk-pilot"
+name = "cheap-watts"
 version = "0.1.0"
 description = "Headless Home Energy Management System optimizing Deye battery storage and EV charging with Pstryk dynamic tariffs."
 readme = "README.md"
@@ -25,12 +25,12 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/rsamborski/pstryk-pilot"
-Repository = "https://github.com/rsamborski/pstryk-pilot"
-Issues = "https://github.com/rsamborski/pstryk-pilot/issues"
+Homepage = "https://github.com/rsamborski/cheap-watts"
+Repository = "https://github.com/rsamborski/cheap-watts"
+Issues = "https://github.com/rsamborski/cheap-watts/issues"
 
 [project.scripts]
-pstryk-pilot = "src.main:app_main"
+cheap-watts = "src.main:app_main"
 
 [dependency-groups]
 dev = [

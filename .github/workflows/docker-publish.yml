@@ -37,9 +37,9 @@ jobs:
           DOCKER_BUILDKIT=1 docker build \
             --label "org.opencontainers.image.source=https://github.com/${REPO_NAME}" \
             --label "org.opencontainers.image.revision=${COMMIT_SHA}" \
-            -t pstryk-pilot:ci \
+            -t cheap-watts:ci \
             .
-          docker run --rm pstryk-pilot:ci --help
+          docker run --rm cheap-watts:ci --help
 
       - name: Log in, build, smoke-test, and push to GHCR
         if: github.event_name != 'pull_request'

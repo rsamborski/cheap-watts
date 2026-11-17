@@ -21,7 +21,7 @@ from src.clients.errors import (
 )
 from src.models import InverterStatus, TouSlot
 
-logger = logging.getLogger("pstryk_pilot.clients.deye")
+logger = logging.getLogger("cheap_watts.clients.deye")
 
 _TOKEN_PATH = "/v1.0/account/token"
 _DEVICE_LATEST_PATH = "/v1.0/device/latest"
@@ -600,7 +600,7 @@ class SolarmanV5Client:
                 mb_slave_id=self._slave_id,
                 socket_timeout=self._timeout,
                 auto_reconnect=True,
-                logger=logging.getLogger("pstryk_pilot.clients.solarman"),
+                logger=logging.getLogger("cheap_watts.clients.solarman"),
             )
         return self._modbus
 

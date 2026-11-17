@@ -15,7 +15,7 @@ Replace or refine the static `TYPICAL_DAILY_USAGE_KWH` setting by running a dail
 ## Requirements
 
 1. **Daily CLI Mode:**
-   - Add a dedicated subcommand/mode on the same CLI (e.g., `pstryk-pilot analyze-usage`) meant to be triggered once daily via `cron`.
+   - Add a dedicated subcommand/mode on the same CLI (e.g., `cheap-watts analyze-usage`) meant to be triggered once daily via `cron`.
 2. **Historical Consumption Retrieval:**
    - Investigate Deye Cloud Open API / Solarman Open API endpoints for historical daily/hourly load consumption (since local Solarman V5 `:8899` only exposes live/cumulative counters unless sampled continuously).
    - Fetch the past $N$ days (e.g., 7–14 days) of real electrical usage.
@@ -32,6 +32,6 @@ Replace or refine the static `TYPICAL_DAILY_USAGE_KWH` setting by running a dail
 
 - [ ] Investigate Deye Cloud / Solarman Open API endpoints for fetching historical daily/hourly electrical consumption.
 - [ ] Implement historical usage fetch method in `src/clients/deye.py` with offline JSON fixtures.
-- [ ] Add `pstryk-pilot analyze-usage` CLI subcommand in `src/main.py` and document daily `cron` schedule in `deploy/crontab.example`.
+- [ ] Add `cheap-watts analyze-usage` CLI subcommand in `src/main.py` and document daily `cron` schedule in `deploy/crontab.example`.
 - [ ] Persist learned usage profile in `src/state.py` and integrate into `src/engine/planner.py` with configurable 10–20% buffer and static fallback.
 - [ ] Add unit tests covering historical payload parsing, pattern calculation, buffer math, and fallback behavior.

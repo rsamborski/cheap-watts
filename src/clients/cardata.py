@@ -29,7 +29,7 @@ from src.clients.errors import (
 )
 from src.models import VehicleStatus
 
-logger = logging.getLogger("pstryk_pilot.clients.cardata")
+logger = logging.getLogger("cheap_watts.clients.cardata")
 
 _MAPPINGS_PATH = "/customers/vehicles/mappings"
 _CONTAINERS_PATH = "/customers/containers"
@@ -38,7 +38,7 @@ _TELEMATIC_PATH_TEMPLATE = "/customers/vehicles/{vin}/telematicData"
 _DEVICE_CODE_SCOPE = "authenticate_user openid cardata:api:read"
 _DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 
-_CONTAINER_NAME = "pstryk-pilot"
+_CONTAINER_NAME = "cheap-watts"
 _CONTAINER_PURPOSE = "EV battery SoC and charging status for home energy optimization"
 _DEFAULT_CONTAINER_DESCRIPTORS: tuple[str, ...] = (
     "vehicle.drivetrain.batteryManagement.header",
@@ -448,7 +448,7 @@ class CarDataClient:
         token: str,
         descriptors: Sequence[str] = _DEFAULT_CONTAINER_DESCRIPTORS,
     ) -> str:
-        """Reuse an active `pstryk-pilot` CarData container or create one."""
+        """Reuse an active `cheap-watts` CarData container or create one."""
         list_url = f"{self._base_url}{_CONTAINERS_PATH}"
         headers = {
             "Authorization": f"Bearer {token}",
@@ -753,7 +753,7 @@ class CarDataClient:
         if not config.client_id or refresh_secret is None:
             raise AuthenticationError(
                 f"Missing CarData credentials for {config.display_name}: run "
-                "`uv run pstryk-pilot cardata-auth` or provide `access_token` / "
+                "`uv run cheap-watts cardata-auth` or provide `access_token` / "
                 "(`client_id` + `refresh_token`)"
             )
 

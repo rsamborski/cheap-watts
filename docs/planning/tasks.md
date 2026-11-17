@@ -1,18 +1,18 @@
-# 📋 `pstryk-pilot` Implementation Backlog
+# 📋 `cheap-watts` Implementation Backlog
 
 Track progress across implementation phases. Update checkboxes as tasks are completed.
 
 ---
 
 ## Phase 0: Planning & Repository Setup
-- [x] Initialize `pstryk-pilot` repository and `README.md`.
+- [x] Initialize `cheap-watts` repository and `README.md`.
 - [x] Finalize architecture and operational requirements (`adr-001-initial-architecture.md`).
 - [x] Establish phased execution plan (`execution-plan.md`).
 
 ## Phase 1: Project Scaffolding & Core Infrastructure (`uv`)
 - [x] Initialize Python 3.12+ project with `uv` (`pyproject.toml`, `uv.lock`, flat `src/` layout).
 - [x] Configure `pydantic-settings` in `src/config.py` and create `.env.example` (Pstryk key, Deye Cloud credentials, BMW CarData client ID, coordinates/kWp, battery specs, EV thresholds, SMTP config, `DRY_RUN`).
-- [x] Implement Linux-style plain-text rotating file logging (`src/logging_setup.py` -> `logs/pstryk-pilot.log`) for easy post-mortem investigation.
+- [x] Implement Linux-style plain-text rotating file logging (`src/logging_setup.py` -> `logs/cheap-watts.log`) for easy post-mortem investigation.
 - [x] Implement local state persistence (`src/state.py`) for alert deduplication and last-applied Deye schedule tracking, ensuring runtime state/logs are git-ignored.
 - [x] Create CLI entrypoint (`src/main.py`) supporting `run` and `--dry-run`.
 
@@ -20,11 +20,11 @@ Track progress across implementation phases. Update checkboxes as tasks are comp
 - [x] Define shared domain models (`src/models.py`: `PriceSlot`, `SolarHour`, `VehicleStatus`, `InverterStatus`, `ChargingPlan`).
 - [x] Implement **Pstryk API client** (`src/clients/pstryk.py`) for fetching today & next-day hourly tariffs.
 - [x] Implement **Deye inverter read clients** (`src/clients/deye.py`) behind an `InverterClient` protocol: **Local LAN Solarman V5 TCP (`:8899`)** (`SolarmanV5Client`) + Deye Cloud Open API (`DeyeCloudClient`) for battery SoC, PV/grid/load power, and 6 TOU slots.
-- [x] Implement **BMW CarData client** (`src/clients/cardata.py`) for reading BMW & MINI SoC, plug connection, and active charging status, including OAuth 2.0 Device Code + PKCE authorization (`pstryk-pilot cardata-auth`), telematics container auto-provisioning, and rotated refresh-token persistence (`data/cardata_tokens.json`).
+- [x] Implement **BMW CarData client** (`src/clients/cardata.py`) for reading BMW & MINI SoC, plug connection, and active charging status, including OAuth 2.0 Device Code + PKCE authorization (`cheap-watts cardata-auth`), telematics container auto-provisioning, and rotated refresh-token persistence (`data/cardata_tokens.json`).
 - [x] Implement **Solar forecast client** (`src/clients/solar.py`) via Open-Meteo / Forecast.Solar.
 - [x] Capture anonymized JSON test fixtures in `tests/fixtures/` and write unit tests for response parsing.
-- [x] Add read-only live API smoke-test CLI command (`pstryk-pilot probe`) with per-service selection and unit tests.
-- [x] Validate manual read-only live connectivity (`pstryk-pilot probe`) across Pstryk tariffs, Open-Meteo dual-string PV forecast, local LAN Solarman V5 Deye inverter telemetry/TOU slots, and BMW CarData telemetry.
+- [x] Add read-only live API smoke-test CLI command (`cheap-watts probe`) with per-service selection and unit tests.
+- [x] Validate manual read-only live connectivity (`cheap-watts probe`) across Pstryk tariffs, Open-Meteo dual-string PV forecast, local LAN Solarman V5 Deye inverter telemetry/TOU slots, and BMW CarData telemetry.
 
 ## Phase 3: Decision Engine & Schedule Planner
 - [x] Add static typical daily usage config (`TYPICAL_DAILY_USAGE_KWH`) in `src/config.py` and `.env.example` for v1 daily battery target sizing.
@@ -46,8 +46,8 @@ Track progress across implementation phases. Update checkboxes as tasks are comp
 - [x] Validate end-to-end `--dry-run` execution against live APIs and verify `[DRY-RUN]` email output.
 
 ## Phase 6: Automated Deployment (GitHub Actions + Mini PC)
-- [x] Add GitHub Actions workflow (`.github/workflows/docker-publish.yml`) to build and push `ghcr.io/rsamborski/pstryk-pilot:latest` (and `:sha-...`) on pushes to `main` after CI checks pass.
-- [x] Set up Mini PC host directory (`/opt/pstryk-pilot` or similar) with `.env`, persistent `data/` and `logs/` volumes, and initial `cardata-auth` token provisioning.
+- [x] Add GitHub Actions workflow (`.github/workflows/docker-publish.yml`) to build and push `ghcr.io/rsamborski/cheap-watts:latest` (and `:sha-...`) on pushes to `main` after CI checks pass.
+- [x] Set up Mini PC host directory (`/opt/cheap-watts` or similar) with `.env`, persistent `data/` and `logs/` volumes, and initial `cardata-auth` token provisioning.
 - [ ] Configure Mini PC `crontab` for 30-minute `docker run --rm --network host` execution, periodic `docker pull` update checks, and weekly `docker image prune`.
 - [x] Document Mini PC + GHCR deployment and update flow in `README.md` and `deploy/`.
 - [ ] *(Manual)* Configure GitHub branch protection on `main` to require pull requests (no direct pushes) and passing CI checks.

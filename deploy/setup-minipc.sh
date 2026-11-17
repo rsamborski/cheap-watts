@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALL_DIR="${INSTALL_DIR:-/opt/pstryk-pilot}"
-IMAGE="${IMAGE:-ghcr.io/rsamborski/pstryk-pilot:latest}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/cheap-watts}"
+IMAGE="${IMAGE:-ghcr.io/rsamborski/cheap-watts:latest}"
 CONTAINER_UID="${CONTAINER_UID:-1000}"
 CONTAINER_GID="${CONTAINER_GID:-1000}"
 
@@ -24,11 +24,11 @@ run_priv() {
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 
-echo "==> Bootstrapping pstryk-pilot host directory at ${INSTALL_DIR}..."
+echo "==> Bootstrapping cheap-watts host directory at ${INSTALL_DIR}..."
 run_priv mkdir -p "${INSTALL_DIR}/data" "${INSTALL_DIR}/logs"
 run_priv chown "${HOST_UID}:${HOST_GID}" "${INSTALL_DIR}"
 
-# Container runs as UID/GID 1000 (pilot) and reads/writes data/ and logs/.
+# Container runs as UID/GID 1000 (watts) and reads/writes data/ and logs/.
 run_priv chown -R "${CONTAINER_UID}:${CONTAINER_GID}" "${INSTALL_DIR}/data" "${INSTALL_DIR}/logs"
 run_priv chmod 700 "${INSTALL_DIR}/data"
 run_priv chmod 750 "${INSTALL_DIR}/logs"

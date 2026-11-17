@@ -15,7 +15,7 @@ import httpx
 from src.clients.errors import ApiClientError, PayloadParseError, parse_json_response
 from src.models import SolarForecast, SolarHour
 
-logger = logging.getLogger("pstryk_pilot.clients.solar")
+logger = logging.getLogger("cheap_watts.clients.solar")
 
 _FORECAST_PATH = "/v1/forecast"
 

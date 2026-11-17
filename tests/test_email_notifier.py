@@ -95,10 +95,10 @@ def test_smtp_notifier_dry_run_prefix_live_starttls_ssl465_and_noop_suppression(
         _env_file=None,
         smtp_host="smtp.example.com",
         smtp_port=587,
-        smtp_username="pilot@example.com",
+        smtp_username="alerts@example.com",
         smtp_password=SecretStr("test-api-key"),
         smtp_use_tls=True,
-        smtp_from_email="pilot@example.com",
+        smtp_from_email="alerts@example.com",
         smtp_to_email="owner@example.com, driver2@example.com",
     )
 
@@ -125,10 +125,10 @@ def test_smtp_notifier_dry_run_prefix_live_starttls_ssl465_and_noop_suppression(
     assert notifier.send_cycle_notification(plan, dry_decision, inverter) is True
     assert len(servers) == 1
     assert servers[0].started_tls is True
-    assert servers[0].logged_in_user == "pilot@example.com"
+    assert servers[0].logged_in_user == "alerts@example.com"
 
     sent_msg = servers[0].sent[0]
-    assert str(sent_msg["Subject"]).startswith("[DRY-RUN] pstryk-pilot:")
+    assert str(sent_msg["Subject"]).startswith("[DRY-RUN] cheap-watts:")
     assert str(sent_msg["To"]) == "owner@example.com, driver2@example.com"
     body_text = sent_msg.get_content()
     assert "[DRY-RUN] Simulation mode active" in body_text
@@ -163,7 +163,7 @@ def test_smtp_notifier_dry_run_prefix_live_starttls_ssl465_and_noop_suppression(
     assert ssl_notifier.send_failure_alert("abc12345", "RuntimeError: boom", dry_run=True) is True
     assert len(servers) == 2
     assert servers[1].port == 465
-    assert str(servers[1].sent[0]["Subject"]).startswith("[DRY-RUN] pstryk-pilot:")
+    assert str(servers[1].sent[0]["Subject"]).startswith("[DRY-RUN] cheap-watts:")
 
     # Unconfigured notifier skips cleanly
     unconfigured = SmtpNotifier(Settings(_env_file=None))

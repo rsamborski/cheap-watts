@@ -1,11 +1,11 @@
-# ADR-001: Initial `pstryk-pilot` Architecture & Operational Decisions
+# ADR-001: Initial `cheap-watts` Architecture & Operational Decisions
 
 - **Status:** Accepted
 - **Date:** 2026-11-14
 
 ## Context
 
-`pstryk-pilot` automates home battery charging (`Deye SUN-10K-SG04LP3-EU`) and coordinates electric/hybrid vehicle charging (`BMW` & `MINI`) against dynamic hourly electricity tariffs (`Pstryk`) and rooftop solar (`PV`) generation.
+`cheap-watts` automates home battery charging (`Deye SUN-10K-SG04LP3-EU`) and coordinates electric/hybrid vehicle charging (`BMW` & `MINI`) against dynamic hourly electricity tariffs (`Pstryk`) and rooftop solar (`PV`) generation.
 
 During initial design discovery, several hardware and operational trade-offs had to be resolved before writing code.
 

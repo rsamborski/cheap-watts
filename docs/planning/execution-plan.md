@@ -1,4 +1,4 @@
-# ⚡ `pstryk-pilot` — Execution Plan
+# ⚡ `cheap-watts` — Execution Plan
 
 An automated, headless Home Energy Management System (HEMS) written in Python (`uv`), triggered by `cron` to optimize **Deye SUN-10K-SG04LP3-EU** battery charging and **BMW / MINI** charging recommendations using **Pstryk** dynamic tariffs and solar forecasts.
 
@@ -16,14 +16,14 @@ An automated, headless Home Energy Management System (HEMS) written in Python (`
 | **Summer / Sun Optimization** | Automatic via **Open-Meteo / Forecast.Solar** (lat/lon + kWp) + real-time Deye PV telemetry. Strong PV turns **OFF** Deye grid-charging (solar charges battery automatically) and recommends daytime **slow-charge (6–10A)** EV windows for self-consumption. |
 | **Notifications** | Standard **SMTP** sent **whenever actionable changes occur** — i.e., any Deye TOU schedule change (including blocking grid-charge hours when an EV starts charging or turning grid-charge OFF for sunny weather) or a new EV charge recommendation — plus critical errors. No email if no changes occur. |
 | **Dry-Run Mode** | `--dry-run` (or `DRY_RUN=true`): runs all read APIs and decision logic, logs planned Deye mutations, **skips all Deye write calls**, and **sends change/alert emails prefixed with `[DRY-RUN]`** (no email if no changes are expected). |
-| **Logging & Audit** | Standard Linux-style plain-text rotating `.log` files (`logs/pstryk-pilot.log` + `stdout`) recording every API snapshot, decision rationale, Deye diff, and notification event. |
+| **Logging & Audit** | Standard Linux-style plain-text rotating `.log` files (`logs/cheap-watts.log` + `stdout`) recording every API snapshot, decision rationale, Deye diff, and notification event. |
 
 ---
 
 ## 2. Proposed Project Structure
 
 ```text
-pstryk-pilot/
+cheap-watts/
 ├── pyproject.toml
 ├── uv.lock
 ├── .env.example
@@ -36,7 +36,7 @@ pstryk-pilot/
 │       └── tasks.md
 ├── src/
 │   ├── __init__.py
-│   ├── main.py                # CLI entrypoint (`pstryk-pilot run --dry-run`)
+│   ├── main.py                # CLI entrypoint (`cheap-watts run --dry-run`)
 │   ├── config.py              # Pydantic settings (thresholds, battery kWh, SMTP, lat/lon, kWp)
 │   ├── logging_setup.py       # Linux-style rotating .log file + console logging
 │   ├── state.py               # JSON/SQLite state store (alert cooldowns, last Deye schedule)
@@ -146,14 +146,14 @@ flowchart TD
   1. Wait for / run quality gates (`ruff`, `black --check`, `pytest`, `gitleaks`).
   2. Log in to `ghcr.io` using `GITHUB_TOKEN` (`permissions: packages: write`).
   3. Build multi-layer cached image from `Dockerfile` (`linux/amd64`, or `linux/amd64,linux/arm64` if running on ARM) and push:
-     - `ghcr.io/rsamborski/pstryk-pilot:latest`
-     - `ghcr.io/rsamborski/pstryk-pilot:sha-<short_sha>`
+     - `ghcr.io/rsamborski/cheap-watts:latest`
+     - `ghcr.io/rsamborski/cheap-watts:sha-<short_sha>`
 
 ### Mini PC Runtime & Auto-Update Design
-1. **Host Directory Layout** (e.g., `/opt/pstryk-pilot`):
+1. **Host Directory Layout** (e.g., `/opt/cheap-watts`):
    - `.env` — production secrets and site settings (never committed or baked into the image).
    - `data/` — persistent volume for `state.json` and `cardata_tokens.json` (`0600` permissions).
-   - `logs/` — persistent volume for `pstryk-pilot.log` and `cron.log`.
+   - `logs/` — persistent volume for `cheap-watts.log` and `cron.log`.
 2. **Initial One-Time Setup:**
    - Install Docker on the Mini PC.
    - If the package is private, run `docker login ghcr.io` once with a read-only PAT (`read:packages`).
@@ -161,10 +161,10 @@ flowchart TD
 3. **Crontab Schedule & Update Mechanism:**
    - **Optimization run (every 30 min):** Run the locally cached `:latest` image with `--network host` (required so the container reaches Deye Solarman V5 `:8899` on the home LAN):
      ```cron
-     */30 * * * * docker run --rm --network host --env-file /opt/pstryk-pilot/.env -v /opt/pstryk-pilot/data:/app/data -v /opt/pstryk-pilot/logs:/app/logs ghcr.io/rsamborski/pstryk-pilot:latest run >> /opt/pstryk-pilot/logs/cron.log 2>&1
+     */30 * * * * docker run --rm --network host --env-file /opt/cheap-watts/.env -v /opt/cheap-watts/data:/app/data -v /opt/cheap-watts/logs:/app/logs ghcr.io/rsamborski/cheap-watts:latest run >> /opt/cheap-watts/logs/cron.log 2>&1
      ```
-   - **Image update check (hourly or daily):** Run `docker pull --quiet ghcr.io/rsamborski/pstryk-pilot:latest` on a separate cron entry (e.g., `15 * * * *`) rather than `--pull=always` on the 30-min job, so a transient internet/GitHub outage never blocks a scheduled energy-optimization run.
-   - **Housekeeping (weekly):** `0 4 * * 0 docker image prune -f >> /opt/pstryk-pilot/logs/cron.log 2>&1` to clean up old untagged layers.
+   - **Image update check (hourly or daily):** Run `docker pull --quiet ghcr.io/rsamborski/cheap-watts:latest` on a separate cron entry (e.g., `15 * * * *`) rather than `--pull=always` on the 30-min job, so a transient internet/GitHub outage never blocks a scheduled energy-optimization run.
+   - **Housekeeping (weekly):** `0 4 * * 0 docker image prune -f >> /opt/cheap-watts/logs/cron.log 2>&1` to clean up old untagged layers.
 
 ---
 

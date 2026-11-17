@@ -1,5 +1,5 @@
 # ==============================================================================
-# pstryk-pilot — Sample crontab configuration
+# cheap-watts — Sample crontab configuration
 # ==============================================================================
 # Install with: crontab -e
 #
@@ -14,25 +14,25 @@ PATH=/usr/local/bin:/usr/bin:/bin
 
 # ==============================================================================
 # Option A (Recommended): Mini PC + Docker + GHCR Auto-Update
-# Host setup: /opt/pstryk-pilot/{.env,data,logs} (see deploy/setup-minipc.sh)
+# Host setup: /opt/cheap-watts/{.env,data,logs} (see deploy/setup-minipc.sh)
 # Note: --network host is required so the container reaches Deye Solarman V5
 # (:8899) directly on the home LAN.
 # ==============================================================================
 
 # --- Stage 1: Dry-Run Burn-In (enable first, then switch to Stage 2) ---
-# */30 * * * * docker run --rm --network host --env-file /opt/pstryk-pilot/.env -v /opt/pstryk-pilot/data:/app/data -v /opt/pstryk-pilot/logs:/app/logs ghcr.io/rsamborski/pstryk-pilot:latest run --dry-run >> /opt/pstryk-pilot/logs/cron.log 2>&1
+# */30 * * * * docker run --rm --network host --env-file /opt/cheap-watts/.env -v /opt/cheap-watts/data:/app/data -v /opt/cheap-watts/logs:/app/logs ghcr.io/rsamborski/cheap-watts:latest run --dry-run >> /opt/cheap-watts/logs/cron.log 2>&1
 
 # --- Stage 2: Live Production Execution ---
-*/30 * * * * docker run --rm --network host --env-file /opt/pstryk-pilot/.env -v /opt/pstryk-pilot/data:/app/data -v /opt/pstryk-pilot/logs:/app/logs ghcr.io/rsamborski/pstryk-pilot:latest run >> /opt/pstryk-pilot/logs/cron.log 2>&1
+*/30 * * * * docker run --rm --network host --env-file /opt/cheap-watts/.env -v /opt/cheap-watts/data:/app/data -v /opt/cheap-watts/logs:/app/logs ghcr.io/rsamborski/cheap-watts:latest run >> /opt/cheap-watts/logs/cron.log 2>&1
 
 # --- Image Auto-Update (decoupled from */30 run so GHCR/WAN outages never block local LAN control) ---
-15 * * * * docker pull --quiet ghcr.io/rsamborski/pstryk-pilot:latest >> /opt/pstryk-pilot/logs/cron.log 2>&1
+15 * * * * docker pull --quiet ghcr.io/rsamborski/cheap-watts:latest >> /opt/cheap-watts/logs/cron.log 2>&1
 
 # --- Weekly Docker Image Housekeeping ---
-0 4 * * 0 docker image prune -f >> /opt/pstryk-pilot/logs/cron.log 2>&1
+0 4 * * 0 docker image prune -f >> /opt/cheap-watts/logs/cron.log 2>&1
 
 # ==============================================================================
 # Option B: Local Python / uv Checkout (without Docker)
 # ==============================================================================
-# */30 * * * * cd /path/to/pstryk-pilot && uv run pstryk-pilot run --dry-run >> /path/to/pstryk-pilot/logs/cron.log 2>&1
-# */30 * * * * cd /path/to/pstryk-pilot && uv run pstryk-pilot run >> /path/to/pstryk-pilot/logs/cron.log 2>&1
+# */30 * * * * cd /path/to/cheap-watts && uv run cheap-watts run --dry-run >> /path/to/cheap-watts/logs/cron.log 2>&1
+# */30 * * * * cd /path/to/cheap-watts && uv run cheap-watts run >> /path/to/cheap-watts/logs/cron.log 2>&1

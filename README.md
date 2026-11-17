@@ -1,10 +1,10 @@
-# ⚡ pstryk-pilot
+# ⚡ cheap-watts
 
-[![Lint — Ruff](https://github.com/rsamborski/pstryk-pilot/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/rsamborski/pstryk-pilot/actions/workflows/lint.yml)
-[![Format — Black](https://github.com/rsamborski/pstryk-pilot/actions/workflows/format.yml/badge.svg?branch=main)](https://github.com/rsamborski/pstryk-pilot/actions/workflows/format.yml)
-[![Tests & Coverage — Pytest](https://github.com/rsamborski/pstryk-pilot/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/rsamborski/pstryk-pilot/actions/workflows/tests.yml)
-[![Security Scan — Gitleaks](https://github.com/rsamborski/pstryk-pilot/actions/workflows/security-scan.yml/badge.svg?branch=main)](https://github.com/rsamborski/pstryk-pilot/actions/workflows/security-scan.yml)
-[![Docker — GHCR](https://github.com/rsamborski/pstryk-pilot/actions/workflows/docker-publish.yml/badge.svg?branch=main)](https://github.com/rsamborski/pstryk-pilot/actions/workflows/docker-publish.yml)
+[![Lint — Ruff](https://github.com/rsamborski/cheap-watts/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/rsamborski/cheap-watts/actions/workflows/lint.yml)
+[![Format — Black](https://github.com/rsamborski/cheap-watts/actions/workflows/format.yml/badge.svg?branch=main)](https://github.com/rsamborski/cheap-watts/actions/workflows/format.yml)
+[![Tests & Coverage — Pytest](https://github.com/rsamborski/cheap-watts/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/rsamborski/cheap-watts/actions/workflows/tests.yml)
+[![Security Scan — Gitleaks](https://github.com/rsamborski/cheap-watts/actions/workflows/security-scan.yml/badge.svg?branch=main)](https://github.com/rsamborski/cheap-watts/actions/workflows/security-scan.yml)
+[![Docker — GHCR](https://github.com/rsamborski/cheap-watts/actions/workflows/docker-publish.yml/badge.svg?branch=main)](https://github.com/rsamborski/cheap-watts/actions/workflows/docker-publish.yml)
 
 A headless Home Energy Management System (HEMS) written in Python 3.12+ (`uv`), invoked periodically via `cron` to optimize **Deye SUN-10K-SG04LP3-EU** home battery charging and **BMW / MINI** EV charging recommendations against **Pstryk** dynamic hourly tariffs and **Open-Meteo** solar forecasts.
 
@@ -82,12 +82,12 @@ SOLAR_AZIMUTH_DEGREES_2=90.0
    ```
 3. Run the interactive browser authorization once per account:
    ```bash
-   uv run pstryk-pilot cardata-auth
+   uv run cheap-watts cardata-auth
    # Or authorize a single vehicle when accounts belong to different drivers:
-   uv run pstryk-pilot cardata-auth -v bmw
-   uv run pstryk-pilot cardata-auth -v mini
+   uv run cheap-watts cardata-auth -v bmw
+   uv run cheap-watts cardata-auth -v mini
    ```
-   `pstryk-pilot` automatically provisions/reuses the `pstryk-pilot` telematics container, discovers VINs, and stores `0600`-protected rotated refresh tokens in `data/cardata_tokens.json`.
+   `cheap-watts` automatically provisions/reuses the `cheap-watts` telematics container, discovers VINs, and stores `0600`-protected rotated refresh tokens in `data/cardata_tokens.json`.
 
 ### 5. SMTP Email Notifications
 Configure any standard SMTP provider (for Gmail, create a 16-character **App Password** under Google Account Security):
@@ -107,17 +107,17 @@ SMTP_TO_EMAIL=driver1@example.com, driver2@example.com
 
 ```bash
 # Verify read-only connectivity across all configured integrations (or a single service):
-uv run pstryk-pilot probe
-uv run pstryk-pilot probe -s deye
+uv run cheap-watts probe
+uv run cheap-watts probe -s deye
 
 # Check configuration readiness and last persisted state:
-uv run pstryk-pilot status
+uv run cheap-watts status
 
 # Run one full optimization cycle in safe simulation mode (no inverter writes, [DRY-RUN] emails):
-uv run pstryk-pilot run --dry-run
+uv run cheap-watts run --dry-run
 
 # Run one live optimization cycle (applies Deye TOU updates when schedule changes):
-uv run pstryk-pilot run
+uv run cheap-watts run
 ```
 
 ---
@@ -144,69 +144,69 @@ uv run pstryk-pilot run
 ## 🕒 Deployment (`cron` & `Docker`)
 
 ### Option A (Recommended): Mini PC + Docker + GHCR Auto-Update
-Every merge to `main` runs all CI checks and publishes `ghcr.io/rsamborski/pstryk-pilot:latest` (and `:sha-<short_sha>`). The Mini PC needs no `git` checkout or Python toolchain:
+Every merge to `main` runs all CI checks and publishes `ghcr.io/rsamborski/cheap-watts:latest` (and `:sha-<short_sha>`). The Mini PC needs no `git` checkout or Python toolchain:
 
-1. **Bootstrap `/opt/pstryk-pilot` (`UID/GID 1000` matches the container `pilot` user):**
+1. **Bootstrap `/opt/cheap-watts` (`UID/GID 1000` matches the container `watts` user):**
    ```bash
    ./deploy/setup-minipc.sh
-   # Creates /opt/pstryk-pilot/{data,logs} (1000:1000) and /opt/pstryk-pilot/.env (0600)
+   # Creates /opt/cheap-watts/{data,logs} (1000:1000) and /opt/cheap-watts/.env (0600)
    ```
-   Copy `.env.example` into `/opt/pstryk-pilot/.env` and fill in your credentials/settings.
+   Copy `.env.example` into `/opt/cheap-watts/.env` and fill in your credentials/settings.
 
 2. **Pull or authenticate Docker to GHCR:**
-   Public GHCR images can be pulled directly without authentication (`docker pull ghcr.io/rsamborski/pstryk-pilot:latest`). If you publish to a private package/fork, log in first with a `read:packages` Personal Access Token:
+   Public GHCR images can be pulled directly without authentication (`docker pull ghcr.io/rsamborski/cheap-watts:latest`). If you publish to a private package/fork, log in first with a `read:packages` Personal Access Token:
    ```bash
    docker login ghcr.io -u <github-username>
-   docker pull ghcr.io/rsamborski/pstryk-pilot:latest
+   docker pull ghcr.io/rsamborski/cheap-watts:latest
    ```
 
 3. **Provision BMW CarData tokens:**
    Either copy an existing `data/cardata_tokens.json` (`chmod 600` and `chown 1000:1000`), or run interactive OAuth inside the container:
    ```bash
    docker run -it --rm \
-     --env-file /opt/pstryk-pilot/.env \
-     -v /opt/pstryk-pilot/data:/app/data \
-     ghcr.io/rsamborski/pstryk-pilot:latest cardata-auth
+     --env-file /opt/cheap-watts/.env \
+     -v /opt/cheap-watts/data:/app/data \
+     ghcr.io/rsamborski/cheap-watts:latest cardata-auth
    ```
 
 4. **Verify connectivity & dry-run before enabling `cron` (`--network host` is required for local Solarman V5 `:8899`):**
    ```bash
    docker run --rm --network host \
-     --env-file /opt/pstryk-pilot/.env \
-     -v /opt/pstryk-pilot/data:/app/data \
-     -v /opt/pstryk-pilot/logs:/app/logs \
-     ghcr.io/rsamborski/pstryk-pilot:latest probe
+     --env-file /opt/cheap-watts/.env \
+     -v /opt/cheap-watts/data:/app/data \
+     -v /opt/cheap-watts/logs:/app/logs \
+     ghcr.io/rsamborski/cheap-watts:latest probe
 
    docker run --rm --network host \
-     --env-file /opt/pstryk-pilot/.env \
-     -v /opt/pstryk-pilot/data:/app/data \
-     -v /opt/pstryk-pilot/logs:/app/logs \
-     ghcr.io/rsamborski/pstryk-pilot:latest run --dry-run
+     --env-file /opt/cheap-watts/.env \
+     -v /opt/cheap-watts/data:/app/data \
+     -v /opt/cheap-watts/logs:/app/logs \
+     ghcr.io/rsamborski/cheap-watts:latest run --dry-run
    ```
 
 5. **Install the Mini PC `crontab` (`crontab -e`, see [`deploy/crontab.example`](deploy/crontab.example)):**
    Schedule every **30 minutes** (`48 runs/day`, staying within BMW CarData's 50 requests/day quota per account), with image updates decoupled so a transient internet/GHCR outage never blocks local LAN inverter control:
    ```cron
    # Start with --dry-run during burn-in, then drop --dry-run to go live:
-   */30 * * * * docker run --rm --network host --env-file /opt/pstryk-pilot/.env -v /opt/pstryk-pilot/data:/app/data -v /opt/pstryk-pilot/logs:/app/logs ghcr.io/rsamborski/pstryk-pilot:latest run >> /opt/pstryk-pilot/logs/cron.log 2>&1
-   15 * * * * docker pull --quiet ghcr.io/rsamborski/pstryk-pilot:latest >> /opt/pstryk-pilot/logs/cron.log 2>&1
-   0 4 * * 0 docker image prune -f >> /opt/pstryk-pilot/logs/cron.log 2>&1
+   */30 * * * * docker run --rm --network host --env-file /opt/cheap-watts/.env -v /opt/cheap-watts/data:/app/data -v /opt/cheap-watts/logs:/app/logs ghcr.io/rsamborski/cheap-watts:latest run >> /opt/cheap-watts/logs/cron.log 2>&1
+   15 * * * * docker pull --quiet ghcr.io/rsamborski/cheap-watts:latest >> /opt/cheap-watts/logs/cron.log 2>&1
+   0 4 * * 0 docker image prune -f >> /opt/cheap-watts/logs/cron.log 2>&1
    ```
 
 ### Option B: Local `uv` Checkout / Local `docker build`
 For running directly from a cloned repo without GHCR:
 ```cron
 # Native uv cron (burn-in with --dry-run first, then remove --dry-run):
-*/30 * * * * cd /path/to/pstryk-pilot && uv run pstryk-pilot run --dry-run >> /path/to/pstryk-pilot/logs/cron.log 2>&1
+*/30 * * * * cd /path/to/cheap-watts && uv run cheap-watts run --dry-run >> /path/to/cheap-watts/logs/cron.log 2>&1
 ```
 Or build and run locally with Docker:
 ```bash
-docker build -t pstryk-pilot:latest .
+docker build -t cheap-watts:latest .
 docker run --rm --network host \
   --env-file .env \
   -v "$(pwd)/data:/app/data" \
   -v "$(pwd)/logs:/app/logs" \
-  pstryk-pilot:latest run --dry-run
+  cheap-watts:latest run --dry-run
 ```
 
 ---
@@ -226,6 +226,6 @@ uv run pre-commit run --all-files
 
 ## ⚠️ Hardware Safety Disclaimer & License
 
-`pstryk-pilot` reads telemetry and writes Time-of-Use (TOU) Modbus holding registers (`146, 148..153, 166..177`) to grid-tied hybrid inverters. Before enabling live writes, verify Modbus register compatibility with your exact inverter firmware and validate schedules using `--dry-run`. Provided "AS IS" without warranty — you operate inverter control automation at your own risk.
+`cheap-watts` reads telemetry and writes Time-of-Use (TOU) Modbus holding registers (`146, 148..153, 166..177`) to grid-tied hybrid inverters. Before enabling live writes, verify Modbus register compatibility with your exact inverter firmware and validate schedules using `--dry-run`. Provided "AS IS" without warranty — you operate inverter control automation at your own risk.
 
 Licensed under the [Apache License 2.0](LICENSE).
