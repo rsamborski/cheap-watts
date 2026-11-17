@@ -8,10 +8,14 @@ from zoneinfo import ZoneInfo
 from src.config import Settings
 from src.engine.planner import (
     build_idle_tou_slots,
+    ev_conflicts_with_locked_tou,
+    is_tou_grid_charging_at,
     map_windows_to_tou_slots,
     plan_charging_schedule,
+    should_replan_deye_schedule,
 )
 from src.models import InverterStatus, PriceSlot, SolarForecast, SolarHour, TouSlot, VehicleStatus
+from src.state import AppState
 
 WARSAW = ZoneInfo("Europe/Warsaw")
 
@@ -478,3 +482,224 @@ def test_missing_tomorrow_prices_before_1400_and_midnight_wrap_mapping() -> None
         now=late_now,
     )
     assert all(not s.grid_charge for s in blocked_horizon_plan.target_tou_slots)
+
+
+def test_mid_hour_24h_horizon_prevents_duplicate_clock_hour_collision() -> None:
+    """Reproduces 23:35 CET bug where now+24h included tonight & tomorrow 23:00-00:00."""
+    now = datetime(2026, 11, 16, 23, 35, tzinfo=WARSAW)
+    base = datetime(2026, 11, 16, 0, 0, tzinfo=WARSAW)
+
+    hourly_rates = [0.90] * 48
+    hourly_rates[23] = 0.20  # Nov 16 23:00-00:00 (in-progress hour)
+    hourly_rates[24] = 0.20  # Nov 17 00:00-01:00
+    hourly_rates[29] = 0.28  # Nov 17 05:00-06:00
+    hourly_rates[47] = 0.19  # Nov 17 23:00-00:00 (outside current_hour_start+24h!)
+    prices = _make_hourly_prices(base, hourly_rates)
+    forecast = _make_solar_forecast(base, [0.0] * 48)
+
+    settings = Settings(
+        _env_file=None,
+        battery_capacity_kwh=10.0,
+        battery_min_soc=15,
+        battery_target_soc=95,
+        battery_max_charge_kw=2.0,
+        typical_daily_usage_kwh=12.0,
+        usage_buffer_pct=10.0,
+    )
+    plan = plan_charging_schedule(
+        settings=settings,
+        inverter=_make_inverter(soc=44),  # 5.10 kWh deficit -> ceil(5.1/2.0) = 3 hours
+        price_slots=prices,
+        solar_forecast=forecast,
+        now=now,
+    )
+
+    _assert_valid_deye_6_slot_ring(plan.target_tou_slots)
+    active_tou = [(s.start_time, s.end_time) for s in plan.target_tou_slots if s.grid_charge]
+    assert active_tou == [("00:00", "01:00"), ("05:00", "06:00"), ("23:00", "00:00")]
+
+
+def test_should_replan_deye_schedule_sticky_lock_and_overrides() -> None:
+    mon_00 = datetime(2026, 11, 16, 0, 0, tzinfo=WARSAW)
+    t_1856 = datetime(2026, 11, 16, 18, 56, tzinfo=WARSAW)
+    t_2335 = datetime(2026, 11, 16, 23, 35, tzinfo=WARSAW)
+    t_0105 = datetime(2026, 11, 17, 1, 5, tzinfo=WARSAW)
+    t_1430 = datetime(2026, 11, 17, 14, 30, tzinfo=WARSAW)
+
+    # Mon+Tue tariffs (48h) with cheap Mon 22:00-01:00 and Tue 05:00-06:00
+    mon_tue_rates = [0.90] * 48
+    for idx in (22, 23, 24, 29):
+        mon_tue_rates[idx] = 0.22
+    mon_tue_prices = _make_hourly_prices(mon_00, mon_tue_rates)
+
+    # Mon+Tue+Wed tariffs (72h) simulating Day-Ahead publish
+    mon_wed_rates = list(mon_tue_rates) + [0.90] * 24
+    for idx in (48, 49, 50, 51):
+        mon_wed_rates[idx] = 0.15
+    mon_wed_prices = _make_hourly_prices(mon_00, mon_wed_rates)
+
+    forecast_dry = _make_solar_forecast(mon_00, [0.0] * 72)
+    forecast_sunny = _make_solar_forecast(mon_00, [1.5] * 72)
+    settings = Settings(
+        _env_file=None,
+        battery_capacity_kwh=10.0,
+        battery_min_soc=15,
+        battery_target_soc=95,
+        battery_max_charge_kw=2.0,
+        typical_daily_usage_kwh=12.0,
+        solar_sufficient_kwh_threshold=12.0,
+    )
+
+    plan_1856 = plan_charging_schedule(
+        settings=settings,
+        inverter=_make_inverter(soc=15),
+        price_slots=mon_tue_prices,
+        solar_forecast=forecast_dry,
+        now=t_1856,
+    )
+    assert is_tou_grid_charging_at(plan_1856.target_tou_slots, t_2335) is True
+    assert is_tou_grid_charging_at(plan_1856.target_tou_slots, t_0105) is False
+
+    # 1. Empty state + TOU disabled -> initial_plan
+    empty_state = AppState()
+    inv_disabled = InverterStatus(
+        device_sn="2700012345",
+        battery_soc=15,
+        tou_enabled=False,
+        tou_slots=build_idle_tou_slots(15),
+        fetched_at=t_1856,
+    )
+    replan, reason = should_replan_deye_schedule(
+        plan_1856, inv_disabled, mon_tue_prices, empty_state, False, t_1856, WARSAW
+    )
+    assert (replan, reason) == (True, "initial_plan")
+
+    # Save committed 18:56 plan
+    locked_inv = _make_inverter(soc=44, tou_slots=plan_1856.target_tou_slots)
+    state = AppState(
+        last_run_dry_run=False,
+        last_deye_schedule=[s.to_record() for s in plan_1856.target_tou_slots],
+        deye_plan_horizon_end=mon_tue_prices[-1].end,
+        deye_plan_solar_sufficient=False,
+    )
+
+    # 2. Switching dry-run -> live must force replan so hardware receives real schedule
+    state.last_run_dry_run = True
+    assert should_replan_deye_schedule(
+        plan_1856, locked_inv, mon_tue_prices, state, False, t_2335, WARSAW
+    ) == (True, "dry_run_to_live_transition")
+    state.last_run_dry_run = False
+
+    # 3. Mid-charge at 23:35 with SAME or even NEW tariffs -> stays locked during active window
+    assert should_replan_deye_schedule(
+        plan_1856, locked_inv, mon_tue_prices, state, False, t_2335, WARSAW
+    ) == (False, "active_charging_window_locked")
+    assert should_replan_deye_schedule(
+        plan_1856, locked_inv, mon_wed_prices, state, False, t_2335, WARSAW
+    ) == (False, "active_charging_window_locked")
+
+    # 4. Gap at 01:05: locked on same tariffs, replans when new tariffs arrive or horizon expires
+    assert should_replan_deye_schedule(
+        plan_1856, locked_inv, mon_tue_prices, state, False, t_0105, WARSAW
+    ) == (False, "sticky_daily_plan_locked")
+    assert should_replan_deye_schedule(
+        plan_1856, locked_inv, mon_wed_prices, state, False, t_0105, WARSAW
+    ) == (True, "new_tariff_horizon")
+
+    expired_now = mon_tue_prices[-1].end + timedelta(hours=1, minutes=5)
+    assert should_replan_deye_schedule(
+        plan_1856, locked_inv, mon_tue_prices, state, False, expired_now, WARSAW
+    ) == (True, "tariff_horizon_expired")
+
+    # 5. Solar regime flip outside active charging triggers replan
+    sunny_plan = plan_charging_schedule(
+        settings=settings,
+        inverter=locked_inv,
+        price_slots=mon_tue_prices,
+        solar_forecast=forecast_sunny,
+        now=t_1430,
+    )
+    assert should_replan_deye_schedule(
+        sunny_plan, locked_inv, mon_tue_prices, state, False, t_1430, WARSAW
+    ) == (True, "solar_regime_changed")
+
+    # 6. EV active charging during locked Deye window overrides immediately
+    bmw_charging = VehicleStatus(
+        vehicle_key="bmw",
+        display_name="BMW",
+        soc_pct=18,
+        is_plugged_in=True,
+        is_charging=True,
+        time_remaining_minutes=120,
+        fetched_at=t_2335,
+    )
+    ev_active_plan = plan_charging_schedule(
+        settings=settings,
+        inverter=locked_inv,
+        price_slots=mon_tue_prices,
+        solar_forecast=forecast_dry,
+        vehicles=[bmw_charging],
+        now=t_2335,
+    )
+    assert (
+        ev_conflicts_with_locked_tou(
+            ev_active_plan, plan_1856.target_tou_slots, mon_tue_prices, t_2335, WARSAW
+        )
+        is True
+    )
+    assert should_replan_deye_schedule(
+        ev_active_plan, locked_inv, mon_tue_prices, state, False, t_2335, WARSAW
+    ) == (True, "ev_conflict_override")
+
+    # 7. Low-SoC EV reservation precedes/overlaps locked Deye -> overrides, then stabilizes!
+    bmw_idle_low = VehicleStatus(
+        vehicle_key="bmw",
+        display_name="BMW",
+        soc_pct=15,
+        is_plugged_in=False,
+        is_charging=False,
+        fetched_at=t_1856,
+    )
+    ev_post_plan = plan_charging_schedule(
+        settings=settings,
+        inverter=_make_inverter(soc=15),
+        price_slots=mon_tue_prices,
+        solar_forecast=forecast_dry,
+        vehicles=[bmw_idle_low],
+        now=t_1856,
+    )
+    assert should_replan_deye_schedule(
+        ev_post_plan, locked_inv, mon_tue_prices, state, False, t_1856, WARSAW
+    ) == (True, "ev_conflict_override")
+
+    # Once replanned strictly post-EV, same EV recommendation no longer conflicts -> sticky lock!
+    # Schedule Deye manually in non-overlapping post-EV slot 02:00-05:00 with EV blocked 22:00-01:00
+    ev_rec_slots = plan_1856.blocked_ev_hours  # empty
+    _ = ev_rec_slots
+    non_overlapping_tou = map_windows_to_tou_slots(
+        windows=[mon_tue_prices[26:28]],  # Tue 02:00-04:00, strictly outside Tue 05:00/22:00-01:00
+        planned_soc=95,
+        min_soc=15,
+        tz=WARSAW,
+    )
+    post_ev_state = AppState(
+        last_run_dry_run=False,
+        last_deye_schedule=[s.to_record() for s in non_overlapping_tou],
+        deye_plan_horizon_end=mon_tue_prices[-1].end,
+        deye_plan_solar_sufficient=False,
+    )
+    assert (
+        ev_conflicts_with_locked_tou(
+            ev_post_plan, non_overlapping_tou, mon_tue_prices, t_1856, WARSAW
+        )
+        is False
+    )
+    assert should_replan_deye_schedule(
+        ev_post_plan,
+        _make_inverter(soc=15, tou_slots=non_overlapping_tou),
+        mon_tue_prices,
+        post_ev_state,
+        False,
+        t_1856,
+        WARSAW,
+    ) == (False, "sticky_daily_plan_locked")
