@@ -39,6 +39,7 @@ jobs:
             --label "org.opencontainers.image.revision=${COMMIT_SHA}" \
             -t cheap-watts:ci \
             .
+          docker run --rm cheap-watts:ci | grep -q "usage: cheap-watts"
           docker run --rm cheap-watts:ci --help
 
       - name: Log in, build, smoke-test, and push to GHCR
@@ -67,6 +68,7 @@ jobs:
             -t "${IMAGE}:${SHORT_TAG}" \
             .
 
+          docker run --rm "${IMAGE}:${SHORT_TAG}" | grep -q "usage: cheap-watts"
           docker run --rm "${IMAGE}:${SHORT_TAG}" --help
 
           docker push "${IMAGE}:latest"
