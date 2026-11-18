@@ -11,7 +11,7 @@ import pytest
 
 from src.clients.cardata import CarDataTokenStore
 from src.config import Settings
-from src.main import execute_cardata_auth, main
+from src.main import app_main, execute_cardata_auth, main
 from src.probe import run_probes
 from src.state import StateStore
 
@@ -186,3 +186,43 @@ def test_cli_cardata_auth_shared_client_id_and_subsequent_probe(
     assert rc_cli_fail == 1
     assert "[SKIP] MINI:" in out_fail
     assert "[FAIL] CarData authorization failed" in out_fail
+
+
+def test_cli_no_args_prints_help_without_running_cycle(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with patch("src.main.execute_run") as mock_run:
+        exit_empty = main([])
+        out_empty = capsys.readouterr().out
+        assert exit_empty == 0
+        mock_run.assert_not_called()
+        assert "usage: cheap-watts" in out_empty
+        for subcommand in ("run", "status", "probe", "cardata-auth"):
+            assert subcommand in out_empty
+
+        exit_flag_only = main(["--env-file", str(tmp_path / ".env")])
+        out_flag_only = capsys.readouterr().out
+        assert exit_flag_only == 0
+        mock_run.assert_not_called()
+        assert "usage: cheap-watts" in out_flag_only
+
+        monkeypatch.setattr("sys.argv", ["cheap-watts"])
+        with pytest.raises(SystemExit) as exc_info:
+            app_main()
+        out_app_main = capsys.readouterr().out
+        assert exc_info.value.code == 0
+        mock_run.assert_not_called()
+        assert "usage: cheap-watts" in out_app_main
+
+
+def test_dockerfile_does_not_default_to_run_command() -> None:
+    dockerfile = Path(__file__).resolve().parents[1] / "Dockerfile"
+    instructions = [
+        line.strip()
+        for line in dockerfile.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert 'ENTRYPOINT ["cheap-watts"]' in instructions
+    assert not any(line.startswith("CMD") for line in instructions)

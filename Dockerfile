@@ -33,4 +33,3 @@ USER watts
 VOLUME ["/app/data", "/app/logs"]
 
 ENTRYPOINT ["cheap-watts"]
-CMD ["run"]
