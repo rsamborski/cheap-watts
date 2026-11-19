@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -74,12 +74,49 @@ class SolarHour(BaseModel):
         return self
 
 
+class DaylightWindow(BaseModel):
+    """Daily sunrise/sunset bounds defining effective solar charging daylight."""
+
+    model_config = ConfigDict(frozen=True)
+
+    sunrise: datetime
+    sunset: datetime
+
+    @field_validator("sunrise")
+    @classmethod
+    def _validate_sunrise_tz(cls, value: datetime) -> datetime:
+        return _require_tz_aware(value, "sunrise")
+
+    @field_validator("sunset")
+    @classmethod
+    def _validate_sunset_tz(cls, value: datetime) -> datetime:
+        return _require_tz_aware(value, "sunset")
+
+    @model_validator(mode="after")
+    def _validate_order(self) -> DaylightWindow:
+        if self.sunset < self.sunrise:
+            raise ValueError("DaylightWindow.sunset must not precede sunrise")
+        return self
+
+    def effective_solar_interval(
+        self,
+        margin: timedelta = timedelta(hours=1),
+    ) -> tuple[datetime, datetime] | None:
+        """Return `(sunrise + margin, sunset - margin)` when positive duration remains."""
+        start = self.sunrise + margin
+        end = self.sunset - margin
+        if end <= start:
+            return None
+        return start, end
+
+
 class SolarForecast(BaseModel):
     """Collection of hourly PV generation forecasts with aggregation helpers."""
 
     model_config = ConfigDict(frozen=True)
 
     hours: list[SolarHour] = Field(default_factory=list)
+    daylight_windows: list[DaylightWindow] = Field(default_factory=list)
     fetched_at: datetime
 
     @field_validator("fetched_at")
@@ -104,6 +141,53 @@ class SolarForecast(BaseModel):
             for hour in self.hours
             if hour.end > window_start and hour.start < window_end
         )
+        return round(total, 3)
+
+    def effective_kwh_between(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+        margin: timedelta = timedelta(hours=1),
+    ) -> float:
+        """Sum prorated PV kWh inside `[window_start, window_end)` and effective daylight.
+
+        When `daylight_windows` are available, only irradiance inside
+        `[sunrise + margin, sunset - margin)` counts toward solar charging.
+        When `daylight_windows` is empty, all irradiance in `[window_start, window_end)`
+        counts (prorated across overlapping hour bounds).
+        """
+        if window_end <= window_start:
+            return 0.0
+
+        light_intervals = (
+            [
+                interval
+                for dw in self.daylight_windows
+                if (interval := dw.effective_solar_interval(margin)) is not None
+            ]
+            if self.daylight_windows
+            else []
+        )
+        if self.daylight_windows and not light_intervals:
+            return 0.0
+
+        total = 0.0
+        for hour in self.hours:
+            seg_start = max(hour.start, window_start)
+            seg_end = min(hour.end, window_end)
+            if seg_end <= seg_start or hour.estimated_kwh <= 0.0:
+                continue
+            slot_seconds = (hour.end - hour.start).total_seconds()
+            if self.daylight_windows:
+                overlap_seconds = sum(
+                    max(0.0, (min(seg_end, le) - max(seg_start, ls)).total_seconds())
+                    for ls, le in light_intervals
+                )
+                active_seconds = min((seg_end - seg_start).total_seconds(), overlap_seconds)
+            else:
+                active_seconds = (seg_end - seg_start).total_seconds()
+            if active_seconds > 0.0:
+                total += hour.estimated_kwh * (active_seconds / slot_seconds)
         return round(total, 3)
 
 

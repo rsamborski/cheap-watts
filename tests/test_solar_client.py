@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -38,7 +39,15 @@ def test_solar_forecast_parses_open_meteo_fixture_and_converts_timezone() -> Non
     assert captured_params["latitude"] == "52.23"
     assert captured_params["longitude"] == "21.01"
     assert captured_params["timezone"] == "UTC"
+    assert captured_params["daily"] == "sunrise,sunset"
     assert len(forecast.hours) == 6
+    assert len(forecast.daylight_windows) == 1
+    assert forecast.daylight_windows[0].sunrise == datetime(
+        2026, 6, 15, 4, 14, tzinfo=ZoneInfo("Europe/Warsaw")
+    )
+    assert forecast.daylight_windows[0].sunset == datetime(
+        2026, 6, 15, 21, 0, tzinfo=ZoneInfo("Europe/Warsaw")
+    )
 
     # 2026-06-15T03:00 UTC -> 05:00 CEST (+02:00), night 0 W/m2
     assert forecast.hours[0].start.hour == 5
@@ -221,3 +230,76 @@ def test_solar_forecast_dual_string_east_west_sums_arrays() -> None:
     # Hour 1 (14:00 UTC): East = 0.2 * 4 * 0.85 = 0.68, West = 0.7 * 6 * 0.85 = 3.57 -> 4.25 kWh
     assert forecast.hours[1].estimated_kwh == pytest.approx(4.25)
     assert forecast.total_kwh == pytest.approx(6.8)
+
+
+def test_solar_forecast_dual_string_requests_daily_once_and_validates_daily_errors() -> None:
+    daily_flags: list[bool] = []
+
+    def dual_handler(request: httpx.Request) -> httpx.Response:
+        daily_flags.append("daily" in request.url.params)
+        payload: dict[str, object] = {
+            "timezone": "UTC",
+            "hourly": {
+                "time": ["2026-06-15T10:00"],
+                "global_tilted_irradiance": [500.0],
+            },
+        }
+        if "daily" in request.url.params:
+            payload["daily"] = {
+                "time": ["2026-06-15"],
+                "sunrise": ["2026-06-15T03:00"],
+                "sunset": ["2026-06-15T19:00"],
+            }
+        return httpx.Response(200, json=payload)
+
+    with SolarForecastClient(
+        latitude=52.23,
+        longitude=21.01,
+        kwp=4.0,
+        extra_arrays=[SolarArray(kwp=6.0, azimuth_degrees=90.0)],
+        transport=httpx.MockTransport(dual_handler),
+    ) as client:
+        forecast = client.fetch_forecast(forecast_days=1)
+
+    assert daily_flags == [True, False]
+    assert len(forecast.daylight_windows) == 1
+
+    # Missing daily object falls back gracefully to empty daylight_windows
+    no_daily_payload = {
+        "timezone": "UTC",
+        "hourly": {"time": ["2026-06-15T10:00"], "shortwave_radiation": [500.0]},
+    }
+    with SolarForecastClient(
+        latitude=52.23,
+        longitude=21.01,
+        kwp=5.0,
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json=no_daily_payload)),
+    ) as client:
+        assert client.fetch_forecast(forecast_days=1).daylight_windows == []
+
+    bad_daily_payloads = [
+        {"hourly": {"time": ["2026-06-15T10:00"], "shortwave_radiation": [100.0]}, "daily": []},
+        {
+            "hourly": {"time": ["2026-06-15T10:00"], "shortwave_radiation": [100.0]},
+            "daily": {"sunrise": ["2026-06-15T03:00"], "sunset": "bad"},
+        },
+        {
+            "hourly": {"time": ["2026-06-15T10:00"], "shortwave_radiation": [100.0]},
+            "daily": {"sunrise": ["2026-06-15T03:00"], "sunset": []},
+        },
+        {
+            "hourly": {"time": ["2026-06-15T10:00"], "shortwave_radiation": [100.0]},
+            "daily": {"sunrise": ["2026-06-15T19:00"], "sunset": ["2026-06-15T03:00"]},
+        },
+    ]
+    for bad in bad_daily_payloads:
+        with (
+            SolarForecastClient(
+                latitude=52.23,
+                longitude=21.01,
+                kwp=5.0,
+                transport=httpx.MockTransport(lambda _r, p=bad: httpx.Response(200, json=p)),
+            ) as client,
+            pytest.raises(PayloadParseError),
+        ):
+            client.fetch_forecast(forecast_days=1)

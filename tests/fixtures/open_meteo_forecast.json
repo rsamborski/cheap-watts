@@ -11,6 +11,11 @@
     "shortwave_radiation": "W/m²",
     "global_tilted_irradiance": "W/m²"
   },
+  "daily_units": {
+    "time": "iso8601",
+    "sunrise": "iso8601",
+    "sunset": "iso8601"
+  },
   "hourly": {
     "time": [
       "2026-06-15T03:00",
@@ -35,6 +40,17 @@
       950.0,
       920.0,
       0.0
+    ]
+  },
+  "daily": {
+    "time": [
+      "2026-06-15"
+    ],
+    "sunrise": [
+      "2026-06-15T02:14"
+    ],
+    "sunset": [
+      "2026-06-15T19:00"
     ]
   }
 }

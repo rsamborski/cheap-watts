@@ -223,6 +223,13 @@ def probe_solar(
             f"Peak hour: {peak.start.strftime('%Y-%m-%d %H:%M')} -> "
             f"{peak.estimated_kwh:.2f} kWh ({peak.irradiance_wm2:.0f} W/m²)"
         )
+    if forecast.daylight_windows:
+        effective = forecast.daylight_windows[0].effective_solar_interval()
+        if effective is not None:
+            details.append(
+                f"Solar charging window: {effective[0].strftime('%H:%M')}-"
+                f"{effective[1].strftime('%H:%M')} (sunrise+1h..sunset-1h)"
+            )
 
     return ProbeResult(
         service="solar",
