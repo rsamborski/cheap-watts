@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from src.models import (
     ChargingPlan,
+    DaylightWindow,
     EvChargeRecommendation,
     InverterStatus,
     PriceSlot,
@@ -77,6 +78,95 @@ def test_solar_forecast_aggregation_helpers() -> None:
 
     with pytest.raises(ValidationError):
         SolarHour(start=d1_noon, end=d1_morning, irradiance_wm2=100.0, estimated_kwh=0.5)
+
+
+def test_daylight_window_and_effective_kwh_between() -> None:
+    warsaw = ZoneInfo("Europe/Warsaw")
+    sunrise = datetime(2026, 11, 19, 7, 0, tzinfo=warsaw)
+    sunset = datetime(2026, 11, 19, 15, 30, tzinfo=warsaw)
+
+    # Effective solar charging interval: 08:00..14:30
+    dw = DaylightWindow(sunrise=sunrise, sunset=sunset)
+    assert dw.effective_solar_interval() == (
+        datetime(2026, 11, 19, 8, 0, tzinfo=warsaw),
+        datetime(2026, 11, 19, 14, 30, tzinfo=warsaw),
+    )
+
+    # Polar short day <= 2h leaves no effective interval
+    short_dw = DaylightWindow(
+        sunrise=datetime(2026, 12, 21, 10, 30, tzinfo=warsaw),
+        sunset=datetime(2026, 12, 21, 12, 30, tzinfo=warsaw),
+    )
+    assert short_dw.effective_solar_interval() is None
+
+    with pytest.raises(ValidationError):
+        DaylightWindow(sunrise=sunset, sunset=sunrise)
+    with pytest.raises(ValidationError):
+        DaylightWindow(
+            sunrise=datetime(2026, 11, 19, 7, 0),
+            sunset=sunset,
+        )
+
+    day_start = datetime(2026, 11, 19, 0, 0, tzinfo=warsaw)
+    hours = [
+        # 07:00-08:00: strictly before sunrise + 1h (08:00) -> 0.0 effective
+        SolarHour(
+            start=day_start + timedelta(hours=7),
+            end=day_start + timedelta(hours=8),
+            irradiance_wm2=150.0,
+            estimated_kwh=1.0,
+        ),
+        # 08:00-09:00: fully inside -> 2.0 effective
+        SolarHour(
+            start=day_start + timedelta(hours=8),
+            end=day_start + timedelta(hours=9),
+            irradiance_wm2=300.0,
+            estimated_kwh=2.0,
+        ),
+        # 14:00-15:00: first half [14:00, 14:30) inside sunset - 1h -> 1.0 effective
+        SolarHour(
+            start=day_start + timedelta(hours=14),
+            end=day_start + timedelta(hours=15),
+            irradiance_wm2=300.0,
+            estimated_kwh=2.0,
+        ),
+        # 15:00-16:00: strictly after sunset - 1h (14:30) -> 0.0 effective
+        SolarHour(
+            start=day_start + timedelta(hours=15),
+            end=day_start + timedelta(hours=16),
+            irradiance_wm2=100.0,
+            estimated_kwh=0.8,
+        ),
+    ]
+    bounded = SolarForecast(
+        hours=hours,
+        daylight_windows=[dw],
+        fetched_at=day_start,
+    )
+    assert bounded.effective_kwh_between(day_start, day_start + timedelta(hours=24)) == 3.0
+    assert bounded.effective_kwh_between(day_start, day_start) == 0.0
+    assert (
+        bounded.effective_kwh_between(
+            day_start + timedelta(hours=8, minutes=30),
+            day_start + timedelta(hours=14, minutes=30),
+        )
+        == 2.0
+    )
+
+    # Without daylight_windows, falls back to prorated full-hour PV across window
+    unbounded = SolarForecast(hours=hours, fetched_at=day_start)
+    assert unbounded.effective_kwh_between(day_start, day_start + timedelta(hours=24)) == 5.8
+    assert (
+        unbounded.effective_kwh_between(
+            day_start + timedelta(hours=8, minutes=30),
+            day_start + timedelta(hours=9),
+        )
+        == 1.0
+    )
+
+    # Non-empty daylight_windows with all polar short days returns 0.0
+    polar = SolarForecast(hours=hours, daylight_windows=[short_dw], fetched_at=day_start)
+    assert polar.effective_kwh_between(day_start, day_start + timedelta(hours=24)) == 0.0
 
 
 def test_tou_slot_validation_and_state_record_roundtrip() -> None:

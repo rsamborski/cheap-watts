@@ -8,7 +8,7 @@
 
 ## Goal
 
-Replace or refine the static `TYPICAL_DAILY_USAGE_KWH` setting by running a daily analysis job that reads historical household consumption from the Deye API, learns typical daily/hourly usage patterns, and feeds that into the grid-charging planner with a configurable 10–20% safety buffer.
+Replace or refine the static `TYPICAL_DAILY_USAGE_KWH` setting (currently used both for total 24h demand and for a constant `TYPICAL_DAILY_USAGE_KWH / 24` hourly discharge projection until the scheduled grid-charging window) by running a daily analysis job that reads historical household consumption from the Deye API, learns typical daily/hourly usage patterns, and feeds that into the grid-charging planner with a configurable 10–20% safety buffer.
 
 ---
 

@@ -14,7 +14,15 @@ from src.engine.planner import (
     plan_charging_schedule,
     should_replan_deye_schedule,
 )
-from src.models import InverterStatus, PriceSlot, SolarForecast, SolarHour, TouSlot, VehicleStatus
+from src.models import (
+    DaylightWindow,
+    InverterStatus,
+    PriceSlot,
+    SolarForecast,
+    SolarHour,
+    TouSlot,
+    VehicleStatus,
+)
 from src.state import AppState
 
 WARSAW = ZoneInfo("Europe/Warsaw")
@@ -344,14 +352,14 @@ def test_daily_usage_cap_limits_grid_charging_below_battery_target_soc() -> None
         now=now,
     )
 
-    # Buffered demand = 4.0 * 1.10 = 4.4 kWh; usable battery above 20% = 0.5 kWh; PV = 0.5 kWh
-    # Deficit = 4.4 - 0.5 - 0.5 = 3.4 kWh -> planned SoC = 25% + 34% = 59% (well below 95%!)
-    assert plan.grid_deficit_kwh == 3.4
+    # Buffered demand = 4.0 * 1.10 = 4.4 kWh; pre-02:00 PV (+0.5) & 2h load (-0.333) -> 2.667 kWh
+    # Usable above 20% = 0.667 kWh, post-02:00 PV = 0.0 -> deficit = 3.733 kWh -> target SoC 64%!
+    assert plan.grid_deficit_kwh == 3.733
     active_slots = [s for s in plan.target_tou_slots if s.grid_charge]
     assert len(active_slots) == 1
     assert active_slots[0].start_time == "02:00"
     assert active_slots[0].end_time == "03:00"
-    assert active_slots[0].target_soc == 59
+    assert active_slots[0].target_soc == 64
 
 
 def test_min_soc_15pct_reserve_excluded_and_10pct_usage_buffer() -> None:
@@ -452,7 +460,7 @@ def test_missing_tomorrow_prices_before_1400_and_midnight_wrap_mapping() -> None
 
     # Low-sun day where battery SoC (95%) already covers daily target -> 0 deficit, grid-charge OFF
     already_full_plan = plan_charging_schedule(
-        settings=settings,
+        settings=settings.model_copy(update={"typical_daily_usage_kwh": 4.0}),
         inverter=_make_inverter(soc=95),
         price_slots=today_only_prices,
         solar_forecast=forecast,
@@ -703,3 +711,134 @@ def test_should_replan_deye_schedule_sticky_lock_and_overrides() -> None:
         t_1856,
         WARSAW,
     ) == (False, "sticky_daily_plan_locked")
+
+
+def test_constant_battery_discharge_projects_lower_soc_at_scheduled_charging_window() -> None:
+    base = datetime(2026, 11, 19, 14, 0, tzinfo=WARSAW)
+    now = datetime(2026, 11, 19, 14, 30, tzinfo=WARSAW)
+
+    # Cheapest 2h window is 02:00-04:00 (indices 12 & 13 from 14:00)
+    hourly_rates = [0.90] * 24
+    hourly_rates[12] = 0.20
+    hourly_rates[13] = 0.20
+    prices = _make_hourly_prices(base, hourly_rates)
+    forecast = _make_solar_forecast(base, [0.0] * 24)
+
+    settings = Settings(
+        _env_file=None,
+        battery_capacity_kwh=10.0,
+        battery_min_soc=20,
+        battery_target_soc=95,
+        battery_max_charge_kw=5.0,
+        typical_daily_usage_kwh=12.0,  # 0.5 kWh/h constant discharge
+        usage_buffer_pct=10.0,
+        solar_sufficient_kwh_threshold=12.0,
+    )
+
+    # 1. SoC 65% at 14:30 discharges 11.5h * 0.5 kW = 5.75 kWh down to 20% floor (2.0 kWh) by 02:00
+    plan_65 = plan_charging_schedule(
+        settings=settings,
+        inverter=_make_inverter(soc=65),
+        price_slots=prices,
+        solar_forecast=forecast,
+        now=now,
+    )
+    assert plan_65.grid_deficit_kwh == 7.5  # Needs 2h (not 1h / 3.0 kWh) at 02:00-04:00
+    active_65 = [
+        (s.start_time, s.end_time, s.target_soc) for s in plan_65.target_tou_slots if s.grid_charge
+    ]
+    assert active_65 == [("02:00", "04:00", 95)]
+
+    # 2. Even at SoC 95% at 14:30, battery drops to 3.75 kWh (38%) by 02:00 -> needs 5.75 kWh (2h)
+    plan_95 = plan_charging_schedule(
+        settings=settings,
+        inverter=_make_inverter(soc=95),
+        price_slots=prices,
+        solar_forecast=forecast,
+        now=now,
+    )
+    assert plan_95.grid_deficit_kwh == 5.75
+    active_95 = [
+        (s.start_time, s.end_time, s.target_soc) for s in plan_95.target_tou_slots if s.grid_charge
+    ]
+    assert active_95 == [("02:00", "04:00", 95)]
+
+
+def test_solar_charging_restricted_to_sunrise_plus_1h_until_sunset_minus_1h() -> None:
+    day_start = datetime(2026, 11, 19, 0, 0, tzinfo=WARSAW)
+    now = datetime(2026, 11, 19, 6, 0, tzinfo=WARSAW)
+
+    # Sunrise 07:00, Sunset 16:00 -> effective solar charging strictly in 08:00..15:00
+    daylight = DaylightWindow(
+        sunrise=datetime(2026, 11, 19, 7, 0, tzinfo=WARSAW),
+        sunset=datetime(2026, 11, 19, 16, 0, tzinfo=WARSAW),
+    )
+
+    hourly_rates = [0.85] * 24
+    hourly_rates[18] = 0.25
+    hourly_rates[19] = 0.25
+    prices = _make_hourly_prices(day_start, hourly_rates)
+
+    # Case A: 13 kWh outside [08:00, 15:00) (07:00=7kWh, 15:00=6kWh) + 3 kWh inside (10:00..13:00)
+    pv_outside_heavy = [0.0] * 24
+    pv_outside_heavy[7] = 7.0
+    pv_outside_heavy[10] = 1.0
+    pv_outside_heavy[11] = 1.0
+    pv_outside_heavy[12] = 1.0
+    pv_outside_heavy[15] = 6.0
+    forecast_a = SolarForecast(
+        hours=_make_solar_forecast(day_start, pv_outside_heavy).hours,
+        daylight_windows=[daylight],
+        fetched_at=now,
+    )
+
+    settings = Settings(
+        _env_file=None,
+        battery_capacity_kwh=10.0,
+        battery_min_soc=20,
+        battery_target_soc=95,
+        battery_max_charge_kw=5.0,
+        typical_daily_usage_kwh=12.0,  # 0.5 kWh/h constant discharge
+        solar_sufficient_kwh_threshold=12.0,
+    )
+
+    # 06:00..18:00 (12h): -6.0 kWh load + 3.0 kWh PV from 60% -> 3.0 kWh -> 6.5 kWh deficit
+    plan_a = plan_charging_schedule(
+        settings=settings,
+        inverter=_make_inverter(soc=60),
+        price_slots=prices,
+        solar_forecast=forecast_a,
+        now=now,
+    )
+    assert plan_a.expected_pv_kwh == 3.0
+    assert plan_a.solar_sufficient is False
+    assert plan_a.grid_deficit_kwh == 6.5
+    active_a = [(s.start_time, s.end_time) for s in plan_a.target_tou_slots if s.grid_charge]
+    assert active_a == [("18:00", "20:00")]
+
+    # Case B: High PV outside [08:00, 15:00) cannot lure solar_slow EV window outside daylight
+    pv_sunny = [0.0] * 24
+    pv_sunny[7] = 5.0  # Before sunrise+1h (ignored)
+    pv_sunny[10] = 3.5
+    pv_sunny[11] = 3.5
+    pv_sunny[12] = 3.5
+    pv_sunny[13] = 3.5  # 14.0 kWh inside [08:00, 15:00)
+    forecast_b = SolarForecast(
+        hours=_make_solar_forecast(day_start, pv_sunny).hours,
+        daylight_windows=[daylight],
+        fetched_at=now,
+    )
+    bmw = VehicleStatus(vehicle_key="bmw", display_name="BMW", soc_pct=15, fetched_at=now)
+    plan_b = plan_charging_schedule(
+        settings=settings,
+        inverter=_make_inverter(soc=40),
+        price_slots=prices,
+        solar_forecast=forecast_b,
+        vehicles=[bmw],
+        now=now,
+    )
+    assert plan_b.expected_pv_kwh == 14.0
+    assert plan_b.solar_sufficient is True
+    assert len(plan_b.ev_recommendations) == 1
+    assert plan_b.ev_recommendations[0].mode == "solar_slow"
+    assert plan_b.ev_recommendations[0].recommended_window == "10:00-14:00"

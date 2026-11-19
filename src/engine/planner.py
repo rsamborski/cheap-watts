@@ -71,7 +71,9 @@ def _select_solar_ev_window(
     if not available:
         return []
 
-    sunny_slots = [s for s in available if solar_forecast.total_kwh_between(s.start, s.end) > 0.05]
+    sunny_slots = [
+        s for s in available if solar_forecast.effective_kwh_between(s.start, s.end) > 0.05
+    ]
     pool = sunny_slots if sunny_slots else list(available)
     runs = _contiguous_runs(pool)
     max_run_len = max(len(r) for r in runs)
@@ -87,7 +89,7 @@ def _select_solar_ev_window(
     return max(
         candidates,
         key=lambda sl: (
-            round(solar_forecast.total_kwh_between(sl[0].start, sl[-1].end), 4),
+            round(solar_forecast.effective_kwh_between(sl[0].start, sl[-1].end), 4),
             -round(sum(s.price_pln_kwh for s in sl), 6),
             -sl[0].start.timestamp(),
         ),
@@ -334,11 +336,44 @@ def map_windows_to_tou_slots(
     ]
 
 
+def _project_battery_energy_kwh(
+    settings: Settings,
+    current_soc: int,
+    start_time: datetime,
+    target_time: datetime,
+    solar_forecast: SolarForecast,
+) -> float:
+    """Project battery energy at `target_time` using constant `TYPICAL_DAILY_USAGE_KWH / 24`."""
+    capacity = settings.battery_capacity_kwh
+    min_reserve_kwh = (settings.battery_min_soc / 100.0) * capacity
+    energy_kwh = (current_soc / 100.0) * capacity
+    if target_time <= start_time:
+        return energy_kwh
+
+    floor_kwh = min(energy_kwh, min_reserve_kwh)
+    hourly_load_kw = settings.typical_daily_usage_kwh / 24.0
+    cursor = start_time.astimezone(UTC)
+    end_utc = target_time.astimezone(UTC)
+    while cursor < end_utc:
+        next_hour = cursor.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        step_end = min(next_hour, end_utc)
+        dt_hours = (step_end - cursor).total_seconds() / 3600.0
+        pv_kwh = solar_forecast.effective_kwh_between(cursor, step_end)
+        net_kwh = pv_kwh - (hourly_load_kw * dt_hours)
+        if net_kwh >= 0.0:
+            energy_kwh = min(capacity, energy_kwh + net_kwh)
+        else:
+            energy_kwh = max(floor_kwh, energy_kwh + net_kwh)
+        cursor = step_end
+    return energy_kwh
+
+
 def _compute_battery_deficit(
     settings: Settings,
     current_soc: int,
     expected_pv_kwh: float,
     solar_sufficient: bool,
+    projected_energy_kwh: float | None = None,
 ) -> tuple[float, int]:
     """Compute `(grid_deficit_kwh, planned_target_soc)` excluding `BATTERY_MIN_SOC` reserve.
 
@@ -353,10 +388,14 @@ def _compute_battery_deficit(
     capacity = settings.battery_capacity_kwh
     min_reserve_kwh = (settings.battery_min_soc / 100.0) * capacity
     target_cap_kwh = (settings.battery_target_soc / 100.0) * capacity
-    current_energy_kwh = (current_soc / 100.0) * capacity
+    effective_energy_kwh = (
+        projected_energy_kwh
+        if projected_energy_kwh is not None
+        else (current_soc / 100.0) * capacity
+    )
 
-    usable_current_kwh = current_energy_kwh - min_reserve_kwh
-    headroom_to_target_kwh = max(0.0, target_cap_kwh - current_energy_kwh)
+    usable_current_kwh = effective_energy_kwh - min_reserve_kwh
+    headroom_to_target_kwh = max(0.0, target_cap_kwh - effective_energy_kwh)
 
     buffered_demand_kwh = settings.typical_daily_usage_kwh * (
         1.0 + settings.usage_buffer_pct / 100.0
@@ -366,11 +405,92 @@ def _compute_battery_deficit(
     if deficit_kwh <= 0.0:
         return 0.0, settings.battery_min_soc
 
-    planned_energy_kwh = min(target_cap_kwh, current_energy_kwh + deficit_kwh)
+    planned_energy_kwh = min(target_cap_kwh, effective_energy_kwh + deficit_kwh)
     raw_soc = int(round((planned_energy_kwh / capacity) * 100.0))
-    min_required = min(settings.battery_target_soc, max(settings.battery_min_soc, current_soc + 1))
+    effective_soc = int(round((effective_energy_kwh / capacity) * 100.0))
+    min_required = min(
+        settings.battery_target_soc, max(settings.battery_min_soc, effective_soc + 1)
+    )
     planned_soc = min(settings.battery_target_soc, max(min_required, raw_soc))
     return deficit_kwh, planned_soc
+
+
+def _plan_deye_windows(
+    settings: Settings,
+    current_soc: int,
+    candidates: Sequence[PriceSlot],
+    solar_forecast: SolarForecast,
+    current_time: datetime,
+    tz: ZoneInfo,
+) -> tuple[list[list[PriceSlot]], float, int, int, int]:
+    """Select Deye grid-charging windows accounting for projected discharge before start."""
+    capacity = settings.battery_capacity_kwh
+    target_cap_kwh = (settings.battery_target_soc / 100.0) * capacity
+
+    usable_candidates = [
+        slot
+        for slot in candidates
+        if _project_battery_energy_kwh(
+            settings,
+            current_soc,
+            current_time,
+            max(current_time, slot.start),
+            solar_forecast,
+        )
+        < target_cap_kwh - 1e-6
+    ]
+    if not usable_candidates:
+        return [], 0.0, settings.battery_min_soc, 0, current_soc
+
+    cheapest = min(
+        usable_candidates,
+        key=lambda s: (round(s.price_pln_kwh, 6), s.start.timestamp()),
+    )
+    anchor_start = max(current_time, cheapest.start)
+    proj_kwh = _project_battery_energy_kwh(
+        settings, current_soc, current_time, anchor_start, solar_forecast
+    )
+    proj_soc = int(round((proj_kwh / capacity) * 100.0))
+    post_pv = solar_forecast.effective_kwh_between(anchor_start, anchor_start + timedelta(hours=24))
+    deficit_kwh, planned_soc = _compute_battery_deficit(
+        settings=settings,
+        current_soc=current_soc,
+        expected_pv_kwh=post_pv,
+        solar_sufficient=False,
+        projected_energy_kwh=proj_kwh,
+    )
+    if deficit_kwh <= 0.0:
+        return [], 0.0, settings.battery_min_soc, 0, proj_soc
+
+    hours_needed = math.ceil(deficit_kwh / settings.battery_max_charge_kw)
+    selected: list[list[PriceSlot]] = []
+    for _ in range(4):
+        selected = _select_deye_windows(usable_candidates, hours_needed=hours_needed, tz=tz)
+        if not selected:
+            return [], deficit_kwh, settings.battery_min_soc, hours_needed, proj_soc
+        win_start = max(current_time, selected[0][0].start)
+        proj_kwh = _project_battery_energy_kwh(
+            settings, current_soc, current_time, win_start, solar_forecast
+        )
+        proj_soc = int(round((proj_kwh / capacity) * 100.0))
+        post_pv = solar_forecast.effective_kwh_between(win_start, win_start + timedelta(hours=24))
+        new_deficit, new_planned_soc = _compute_battery_deficit(
+            settings=settings,
+            current_soc=current_soc,
+            expected_pv_kwh=post_pv,
+            solar_sufficient=False,
+            projected_energy_kwh=proj_kwh,
+        )
+        if new_deficit <= 0.0:
+            return [], 0.0, settings.battery_min_soc, 0, proj_soc
+        deficit_kwh, planned_soc = new_deficit, new_planned_soc
+        new_hours = math.ceil(new_deficit / settings.battery_max_charge_kw)
+        if new_hours > hours_needed:
+            hours_needed = new_hours
+            continue
+        break
+
+    return selected, deficit_kwh, planned_soc, hours_needed, proj_soc
 
 
 def plan_charging_schedule(
@@ -396,20 +516,19 @@ def plan_charging_schedule(
         key=lambda s: s.start,
     )
 
-    expected_pv_kwh = solar_forecast.total_kwh_between(current_time, horizon_end)
+    expected_pv_kwh = solar_forecast.effective_kwh_between(current_time, horizon_end)
     solar_sufficient = expected_pv_kwh >= settings.solar_sufficient_kwh_threshold
 
-    grid_deficit_kwh, planned_soc = _compute_battery_deficit(
-        settings=settings,
-        current_soc=inverter.battery_soc,
-        expected_pv_kwh=expected_pv_kwh,
-        solar_sufficient=solar_sufficient,
-    )
-    deye_hours_needed = (
-        math.ceil(grid_deficit_kwh / settings.battery_max_charge_kw)
-        if grid_deficit_kwh > 0.0
-        else 0
-    )
+    prelim_deye_hours = 0
+    if not solar_sufficient and upcoming_slots:
+        _, _, _, prelim_deye_hours, _ = _plan_deye_windows(
+            settings=settings,
+            current_soc=inverter.battery_soc,
+            candidates=upcoming_slots,
+            solar_forecast=solar_forecast,
+            current_time=current_time,
+            tz=tz,
+        )
 
     ev_actively_charging: list[str] = []
     ev_recommendations: list[EvChargeRecommendation] = []
@@ -468,7 +587,7 @@ def plan_charging_schedule(
                     for later in vehicles[idx + 1 :]
                     if later.soc_pct <= _vehicle_threshold(later, settings)
                 )
-                extra_room = deye_hours_needed + (remaining_evs * _DEFAULT_EV_GRID_HOURS)
+                extra_room = prelim_deye_hours + (remaining_evs * _DEFAULT_EV_GRID_HOURS)
                 chosen = _select_cheap_ev_window(available_for_ev, deye_hours_needed=extra_room)
                 mode = "grid_cheap"
                 amps = None
@@ -503,15 +622,12 @@ def plan_charging_schedule(
 
     # Step 2: Select 0, 1, or 2 post-EV Deye grid-charging windows
     selected_windows: list[list[PriceSlot]] = []
+    grid_deficit_kwh = 0.0
+    planned_soc = settings.battery_min_soc
+
     if solar_sufficient:
         rationale_parts.append("Sunny mode: Deye TOU grid-charging OFF")
-    elif grid_deficit_kwh <= 0.0:
-        rationale_parts.append(
-            f"Battery SoC {inverter.battery_soc}% + PV covers daily target: "
-            "Deye TOU grid-charging OFF"
-        )
     elif not upcoming_slots:
-        grid_deficit_kwh = 0.0
         rationale_parts.append("No upcoming tariff slots available: Deye TOU grid-charging OFF")
     else:
         blocked_set = set(blocked_ev_hours)
@@ -520,22 +636,54 @@ def plan_charging_schedule(
             for s in upcoming_slots
             if s.start not in blocked_set and (post_ev_cutoff is None or s.start >= post_ev_cutoff)
         ]
-        selected_windows = _select_deye_windows(
-            deye_candidates,
-            hours_needed=deye_hours_needed,
-            tz=tz,
-        )
-        if selected_windows:
-            win_labels = [_format_window(w, tz) for w in selected_windows]
-            rationale_parts.append(
-                f"Low-sun deficit={grid_deficit_kwh:.2f}kWh ({deye_hours_needed}h -> "
-                f"target {planned_soc}%): Deye windows {', '.join(win_labels)}"
+        if not deye_candidates:
+            _, blocked_deficit, _, _, _ = _plan_deye_windows(
+                settings=settings,
+                current_soc=inverter.battery_soc,
+                candidates=upcoming_slots,
+                solar_forecast=solar_forecast,
+                current_time=current_time,
+                tz=tz,
             )
+            grid_deficit_kwh = blocked_deficit
+            if grid_deficit_kwh > 0.0:
+                rationale_parts.append(
+                    f"Deficit={grid_deficit_kwh:.2f}kWh but 0 post-EV slots remain in horizon: "
+                    "Deye TOU grid-charging OFF"
+                )
+            else:
+                rationale_parts.append(
+                    f"Battery SoC {inverter.battery_soc}% + PV covers daily target: "
+                    "Deye TOU grid-charging OFF"
+                )
         else:
-            rationale_parts.append(
-                f"Deficit={grid_deficit_kwh:.2f}kWh but 0 post-EV slots remain in horizon: "
-                "Deye TOU grid-charging OFF"
+            (
+                selected_windows,
+                grid_deficit_kwh,
+                planned_soc,
+                deye_hours_needed,
+                projected_soc,
+            ) = _plan_deye_windows(
+                settings=settings,
+                current_soc=inverter.battery_soc,
+                candidates=deye_candidates,
+                solar_forecast=solar_forecast,
+                current_time=current_time,
+                tz=tz,
             )
+            if grid_deficit_kwh <= 0.0:
+                rationale_parts.append(
+                    f"Battery SoC {inverter.battery_soc}% (projected ~{projected_soc}%) + "
+                    "PV covers daily target: Deye TOU grid-charging OFF"
+                )
+            else:
+                win_labels = [_format_window(w, tz) for w in selected_windows]
+                rationale_parts.append(
+                    f"Low-sun deficit={grid_deficit_kwh:.2f}kWh "
+                    f"(SoC {inverter.battery_soc}% -> ~{projected_soc}%, "
+                    f"{deye_hours_needed}h -> target {planned_soc}%): "
+                    f"Deye windows {', '.join(win_labels)}"
+                )
 
     target_tou_slots = map_windows_to_tou_slots(
         windows=selected_windows,

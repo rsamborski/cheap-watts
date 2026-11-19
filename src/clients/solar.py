@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 
 from src.clients.errors import ApiClientError, PayloadParseError, parse_json_response
-from src.models import SolarForecast, SolarHour
+from src.models import DaylightWindow, SolarForecast, SolarHour
 
 logger = logging.getLogger("cheap_watts.clients.solar")
 
@@ -123,21 +123,29 @@ class SolarForecastClient:
         if not 1 <= forecast_days <= 7:
             raise ValueError("forecast_days must be between 1 and 7")
 
-        per_array_hours = [
-            (array, self._fetch_single_array(array, forecast_days)) for array in self._arrays
+        per_array_results = [
+            (array, self._fetch_single_array(array, forecast_days, include_daily=(idx == 0)))
+            for idx, array in enumerate(self._arrays)
         ]
+        per_array_hours = [(array, hours) for array, (hours, _) in per_array_results]
+        daylight_windows = per_array_results[0][1][1]
         if len(per_array_hours) == 1:
             hours = per_array_hours[0][1]
         else:
             hours = self._merge_array_hours(per_array_hours)
 
         hours.sort(key=lambda item: item.start)
-        forecast = SolarForecast(hours=hours, fetched_at=datetime.now(tz=UTC))
+        forecast = SolarForecast(
+            hours=hours,
+            daylight_windows=daylight_windows,
+            fetched_at=datetime.now(tz=UTC),
+        )
         logger.info(
             "Fetched Open-Meteo solar forecast",
             extra={
                 "event": "solar_forecast_fetched",
                 "hour_count": len(hours),
+                "daylight_days": len(daylight_windows),
                 "total_kwh": forecast.total_kwh,
                 "kwp": self._kwp,
                 "arrays": len(self._arrays),
@@ -145,21 +153,27 @@ class SolarForecastClient:
         )
         return forecast
 
-    def _fetch_single_array(self, array: SolarArray, forecast_days: int) -> list[SolarHour]:
-        """Fetch and convert hourly irradiance for a single PV array plane."""
+    def _fetch_single_array(
+        self,
+        array: SolarArray,
+        forecast_days: int,
+        include_daily: bool = True,
+    ) -> tuple[list[SolarHour], list[DaylightWindow]]:
+        """Fetch and convert hourly irradiance (and optional daily sun bounds) for a PV plane."""
+        params: dict[str, Any] = {
+            "latitude": self._latitude,
+            "longitude": self._longitude,
+            "hourly": "shortwave_radiation,global_tilted_irradiance",
+            "tilt": array.tilt_degrees,
+            "azimuth": array.azimuth_degrees,
+            "timezone": "UTC",
+            "forecast_days": forecast_days,
+        }
+        if include_daily:
+            params["daily"] = "sunrise,sunset"
+
         try:
-            response = self._client.get(
-                _FORECAST_PATH,
-                params={
-                    "latitude": self._latitude,
-                    "longitude": self._longitude,
-                    "hourly": "shortwave_radiation,global_tilted_irradiance",
-                    "tilt": array.tilt_degrees,
-                    "azimuth": array.azimuth_degrees,
-                    "timezone": "UTC",
-                    "forecast_days": forecast_days,
-                },
-            )
+            response = self._client.get(_FORECAST_PATH, params=params)
         except httpx.HTTPError as exc:
             raise ApiClientError(
                 f"Open-Meteo solar forecast network error: {exc.__class__.__name__}"
@@ -210,7 +224,45 @@ class SolarForecastClient:
                     estimated_kwh=estimated_kwh,
                 )
             )
-        return hours
+        daylight_windows = (
+            self._parse_daylight_windows(payload.get("daily"), response_tz, self._tz)
+            if include_daily
+            else []
+        )
+        return hours, daylight_windows
+
+    @staticmethod
+    def _parse_daylight_windows(
+        daily: Any,
+        response_tz: tzinfo,
+        target_tz: ZoneInfo,
+    ) -> list[DaylightWindow]:
+        if daily is None:
+            return []
+        if not isinstance(daily, dict):
+            raise PayloadParseError("Open-Meteo 'daily' must be an object")
+
+        sunrises = daily.get("sunrise")
+        sunsets = daily.get("sunset")
+        if sunrises is None and sunsets is None:
+            return []
+        if not isinstance(sunrises, list) or not isinstance(sunsets, list):
+            raise PayloadParseError("Open-Meteo 'daily.sunrise' and 'daily.sunset' length mismatch")
+        if len(sunrises) != len(sunsets):
+            raise PayloadParseError("Open-Meteo 'daily.sunrise' and 'daily.sunset' length mismatch")
+
+        windows: list[DaylightWindow] = []
+        for raw_sr, raw_ss in zip(sunrises, sunsets, strict=True):
+            if raw_sr is None or raw_ss is None:
+                continue
+            sunrise_dt = _parse_open_meteo_time(raw_sr, response_tz, target_tz)
+            sunset_dt = _parse_open_meteo_time(raw_ss, response_tz, target_tz)
+            if sunset_dt < sunrise_dt:
+                raise PayloadParseError("Open-Meteo sunset precedes sunrise")
+            windows.append(DaylightWindow(sunrise=sunrise_dt, sunset=sunset_dt))
+
+        windows.sort(key=lambda item: item.sunrise)
+        return windows
 
     @staticmethod
     def _merge_array_hours(

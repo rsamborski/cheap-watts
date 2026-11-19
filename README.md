@@ -15,8 +15,9 @@ A headless Home Energy Management System (HEMS) written in Python 3.12+ (`uv`), 
 ## ✨ Key Capabilities
 
 1. **PV-First Battery Strategy:**
-   - **Sufficient Sun (`24h PV >= SOLAR_SUFFICIENT_KWH_THRESHOLD`):** Turns Deye Time-of-Use (TOU) **grid-charging OFF** across all 6 slots so rooftop PV charges the home battery for free.
-   - **Low Sun / Cloudy Weather:** Excludes the untouchable `BATTERY_MIN_SOC` reserve from usable battery energy, applies `USAGE_BUFFER_PCT` (`+10%` default) to `TYPICAL_DAILY_USAGE_KWH`, and selects the globally cheapest **1–2 contiguous Pstryk windows** mapped cleanly onto Deye's 6-slot `00:00..24:00` TOU ring.
+   - **Effective Daylight Window (`sunrise + 1h` .. `sunset - 1h`):** Uses Open-Meteo daily `sunrise` / `sunset` bounds so only irradiance inside `[sunrise + 1h, sunset - 1h)` counts toward solar charging (ignoring low-angle twilight hours).
+   - **Sufficient Sun (`24h effective PV >= SOLAR_SUFFICIENT_KWH_THRESHOLD`):** Turns Deye Time-of-Use (TOU) **grid-charging OFF** across all 6 slots so rooftop PV charges the home battery for free.
+   - **Low Sun / Cloudy Weather:** Excludes the untouchable `BATTERY_MIN_SOC` reserve from usable battery energy, projects battery state forward to the scheduled charging start using constant household consumption (`TYPICAL_DAILY_USAGE_KWH / 24`) offset by effective PV, applies `USAGE_BUFFER_PCT` (`+10%` default) to `TYPICAL_DAILY_USAGE_KWH`, and selects the globally cheapest **1–2 contiguous Pstryk windows** mapped cleanly onto Deye's 6-slot `00:00..24:00` TOU ring.
    - **Sticky Daily TOU Plan:** Locks Deye TOU slots per Pstryk Day-Ahead tariff horizon (preventing mid-charge overwrites and night-to-night churn across 30-min cron runs), re-planning early only if an EV plugs in / conflicts or the solar sufficiency regime flips.
 2. **EV Priority & Strict Non-Overlap (BMW & MINI):**
    - **Active EV Session Detection:** If BMW CarData reports an EV is actively charging, skips redundant EV alerts and blocks those hours from Deye grid-charging.
