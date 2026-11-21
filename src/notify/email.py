@@ -95,8 +95,8 @@ def build_cycle_email(
         action_verb = "Planned (DRY-RUN)" if decision.dry_run else "Applied"
         body_lines.append(f"Deye TOU Schedule Changes ({action_verb})")
         body_lines.append("-" * 32)
-        body_lines.append(decision.schedule_diff.format_audit_log())
-        body_lines.append("")
+        # body_lines.append(decision.schedule_diff.format_audit_log())
+        # body_lines.append("")
         body_lines.append("Target 6-Slot Deye TOU Schedule:")
         for slot in plan.target_tou_slots:
             gc_str = "ON " if slot.grid_charge else "OFF"
