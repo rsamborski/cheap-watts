@@ -176,4 +176,4 @@ Planned post-v1 enhancements are tracked in separate feature planning files:
 
 - [F001: Vacation Mode](features/F001-vacation-mode.md)
 - [F002: Historical Usage Analysis](features/F002-historical-usage-analysis.md)
-- [F003: Missed EV Charging Window Re-Notification](features/F003-missed-ev-window-renotification.md)
+- [F003: EV Home Presence, Postponement & Missed-Window Re-Notification](features/F003-missed-ev-window-renotification.md)

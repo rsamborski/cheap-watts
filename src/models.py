@@ -268,6 +268,8 @@ class VehicleStatus(BaseModel):
     charging_status_raw: str | None = None
     target_soc_pct: int | None = Field(default=None, ge=0, le=100)
     time_remaining_minutes: int | None = Field(default=None, ge=0)
+    distance_from_home_m: float | None = Field(default=None, ge=0.0)
+    is_at_home: bool | None = None
     fetched_at: datetime
 
     @field_validator("fetched_at")

@@ -469,3 +469,272 @@ def test_sticky_daily_plan_prevents_mid_charge_overwrite_until_new_tariffs_or_ev
 
     # Verify status command reports the persisted Deye plan horizon cleanly
     assert execute_status(settings) == 0
+
+
+def test_pipeline_away_deferral_then_home_arrival_and_bounded_missed_renotifications(
+    tmp_path: Path,
+) -> None:
+    warsaw = ZoneInfo("Europe/Warsaw")
+    day_00 = datetime(2026, 11, 22, 0, 0, tzinfo=warsaw)
+
+    # 72h prices: days 0-1 at 01:00-04:00 & 12:00-15:00; day 2 shifts to 15:00-18:00
+    rates: list[float] = []
+    for day_idx in range(3):
+        day_rates = [0.90] * 24
+        for h in (1, 2, 3):
+            day_rates[h] = 0.20
+        if day_idx < 2:
+            for h in (12, 13, 14):
+                day_rates[h] = 0.20
+        else:
+            for h in (4, 5):
+                day_rates[h] = 0.25
+            for h in (15, 16, 17):
+                day_rates[h] = 0.20
+        rates.extend(day_rates)
+
+    frames = []
+    for idx, price in enumerate(rates):
+        s_utc = (day_00 + timedelta(hours=idx)).astimezone(UTC)
+        e_utc = (day_00 + timedelta(hours=idx + 1)).astimezone(UTC)
+        frames.append(
+            {
+                "start": s_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "end": e_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "metrics": {"pricing": {"full_price": price}},
+            }
+        )
+    pstryk_bytes = json.dumps({"frames": frames, "summary": {}}).encode("utf-8")
+    solar_bytes = json.dumps(
+        {
+            "hourly": {
+                "time": [
+                    (day_00 + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M") for h in range(72)
+                ],
+                "shortwave_radiation": [0.0] * 72,
+            }
+        }
+    ).encode("utf-8")
+
+    mini_location = {"lat": 52.2900, "lon": 21.1000}  # Start away from home (~9km)
+
+    def mini_handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "telematicData": {
+                    "vehicle.drivetrain.batteryManagement.header": {"value": 28},
+                    "vehicle.drivetrain.electricEngine.charging.status": {"value": "NOCHARGING"},
+                    "vehicle.body.chargingPort.status": {"value": "DISCONNECTED"},
+                    "vehicle.cabin.infotainment.navigation.currentLocation.latitude": {
+                        "value": str(mini_location["lat"])
+                    },
+                    "vehicle.cabin.infotainment.navigation.currentLocation.longitude": {
+                        "value": str(mini_location["lon"])
+                    },
+                }
+            },
+        )
+
+    tokens_file = tmp_path / "data" / "cardata_tokens.json"
+    CarDataTokenStore(tokens_file).upsert(
+        "mini",
+        CarDataTokenRecord(
+            access_token=SecretStr("test-api-key"),
+            refresh_token=SecretStr("test-api-key"),
+            expires_at=datetime.now(tz=UTC) + timedelta(hours=72),
+            client_id="example-mini-client",
+            vin="WMW0000000EXAMPLE2",
+            container_id="CONT0000EXAMPLE2",
+        ),
+    )
+
+    telemetry = [0] * 86
+    telemetry[0] = 20
+    tou_regs = [0] * 32
+    tou_regs[0] = 0xFF
+    for idx, hhmm in enumerate((0, 400, 800, 1200, 1600, 2000)):
+        tou_regs[2 + idx] = hhmm
+        tou_regs[20 + idx] = 20
+
+    class FakeModbus:
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            pass
+
+        def read_holding_registers(self, register_addr: int, quantity: int) -> list[int]:
+            return [20] + [0] * (quantity - 1) if register_addr == 588 else list(tou_regs)
+
+        def write_multiple_holding_registers(self, register_addr: int, values: list[int]) -> None:
+            if register_addr == 146:
+                tou_regs[0] = values[0]
+            elif register_addr == 148:
+                tou_regs[2:8] = list(values)
+            elif register_addr == 166:
+                tou_regs[20 : 20 + len(values)] = list(values)
+
+        def disconnect(self) -> None:
+            pass
+
+    sent_emails: list[EmailMessage] = []
+
+    class FakeSmtp:
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeSmtp:
+            return self
+
+        def __exit__(self, *_a: object) -> None:
+            pass
+
+        def ehlo(self) -> None:
+            pass
+
+        def starttls(self, **_kw: object) -> None:
+            pass
+
+        def login(self, *_a: object) -> None:
+            pass
+
+        def send_message(self, msg: EmailMessage) -> None:
+            sent_emails.append(msg)
+
+    transports = {
+        "pstryk": httpx.MockTransport(lambda _r: httpx.Response(200, content=pstryk_bytes)),
+        "solar": httpx.MockTransport(lambda _r: httpx.Response(200, content=solar_bytes)),
+        "cardata": httpx.MockTransport(mini_handler),
+    }
+
+    settings = Settings(
+        _env_file=None,
+        log_dir=tmp_path / "logs",
+        state_file=tmp_path / "data" / "state.json",
+        cardata_tokens_file=tokens_file,
+        pstryk_api_key=SecretStr("test-api-key"),
+        solar_latitude=52.2300,
+        solar_longitude=21.0100,
+        solar_kwp=5.0,
+        home_radius_meters=200.0,
+        solar_sufficient_kwh_threshold=50.0,
+        deye_modbus_host="192.168.1.50",
+        deye_logger_serial="2700012345",
+        mini_cardata_client_id="example-mini-client",
+        smtp_host="smtp.example.com",
+        smtp_from_email="alerts@example.com",
+        smtp_to_email="owner@example.com",
+        alert_cooldown_hours=12.0,
+        max_missed_ev_renotifications=3,
+    )
+
+    # 1. 11:00: MINI away -> Deye schedules initial grid-charge, NO MINI EV recommendation!
+    assert (
+        execute_run(
+            settings,
+            force_dry_run=False,
+            transports=transports,
+            modbus_factory=FakeModbus,
+            smtp_factory=FakeSmtp,
+            now=datetime(2026, 11, 22, 11, 0, tzinfo=warsaw),
+        )
+        == 0
+    )
+    _clear_app_loggers()
+    assert len(sent_emails) == 1
+    assert "EV Charging Recommendations" not in sent_emails[0].get_content()
+
+    # 2. 11:30: MINI arrives home -> recommends 12:00-15:00 immediately!
+    mini_location["lat"] = 52.2301
+    mini_location["lon"] = 21.0101
+    assert (
+        execute_run(
+            settings,
+            force_dry_run=False,
+            transports=transports,
+            modbus_factory=FakeModbus,
+            smtp_factory=FakeSmtp,
+            now=datetime(2026, 11, 22, 11, 30, tzinfo=warsaw),
+        )
+        == 0
+    )
+    _clear_app_loggers()
+    assert len(sent_emails) == 2
+    assert "Window 12:00-15:00" in sent_emails[1].get_content()
+
+    # 3. 13:00 (mid-window): no duplicate alert!
+    assert (
+        execute_run(
+            settings,
+            force_dry_run=False,
+            transports=transports,
+            modbus_factory=FakeModbus,
+            smtp_factory=FakeSmtp,
+            now=datetime(2026, 11, 22, 13, 0, tzinfo=warsaw),
+        )
+        == 0
+    )
+    _clear_app_loggers()
+    assert len(sent_emails) == 2
+
+    # 4. Missed windows #1, #2, #3 (at end of each window, well inside 12h cooldown) -> 3 follow-ups
+    for expected_num, ts in enumerate(
+        (
+            datetime(2026, 11, 22, 15, 5, tzinfo=warsaw),  # Missed 12:00-15:00 -> next 01:00-04:00
+            datetime(2026, 11, 23, 4, 5, tzinfo=warsaw),  # Missed 01:00-04:00 -> next 12:00-15:00
+            datetime(2026, 11, 23, 15, 5, tzinfo=warsaw),  # Missed 12:00-15:00 -> next 01:00-04:00
+        ),
+        start=1,
+    ):
+        assert (
+            execute_run(
+                settings,
+                force_dry_run=False,
+                transports=transports,
+                modbus_factory=FakeModbus,
+                smtp_factory=FakeSmtp,
+                now=ts,
+            )
+            == 0
+        )
+        _clear_app_loggers()
+        assert len(sent_emails) == 2 + expected_num
+        assert (
+            f"[missed previous window — follow-up #{expected_num}]" in sent_emails[-1].get_content()
+        )
+
+    # 5. 4th miss with 24h cooldown (<13h elapsed) pauses EV reservation and sends 0 emails
+    saved = StateStore(settings.state_file).load()
+    assert saved.vehicle_alerts["mini"].missed_window_count == 3
+
+    capped_settings = settings.model_copy(update={"alert_cooldown_hours": 24.0})
+    assert (
+        execute_run(
+            capped_settings,
+            force_dry_run=False,
+            transports=transports,
+            modbus_factory=FakeModbus,
+            smtp_factory=FakeSmtp,
+            now=datetime(2026, 11, 24, 4, 5, tzinfo=warsaw),
+        )
+        == 0
+    )
+    _clear_app_loggers()
+    assert len(sent_emails) == 5
+    assert StateStore(settings.state_file).load().vehicle_alerts["mini"].missed_window_count == 3
+
+    # Once 24h cooldown elapses, standard EV notification resumes without incrementing missed count
+    assert (
+        execute_run(
+            capped_settings,
+            force_dry_run=False,
+            transports=transports,
+            modbus_factory=FakeModbus,
+            smtp_factory=FakeSmtp,
+            now=datetime(2026, 11, 24, 15, 10, tzinfo=warsaw),
+        )
+        == 0
+    )
+    _clear_app_loggers()
+    assert len(sent_emails) == 6
+    assert "EV Charging Recommendations" in sent_emails[-1].get_content()
+    assert "[missed previous window" not in sent_emails[-1].get_content()
+    assert StateStore(settings.state_file).load().vehicle_alerts["mini"].missed_window_count == 3

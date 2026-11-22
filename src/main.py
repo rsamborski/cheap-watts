@@ -106,6 +106,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Authorize both vehicles or a single vehicle (default: all).",
     )
 
+    postpone_parser = subparsers.add_parser(
+        "postpone",
+        help="Postpone EV charging recommendations until a later time and replan.",
+    )
+    postpone_parser.add_argument(
+        "--vehicle",
+        "-v",
+        choices=("bmw", "mini"),
+        required=True,
+        help="Target vehicle (`bmw` or `mini`).",
+    )
+    postpone_group = postpone_parser.add_mutually_exclusive_group(required=True)
+    postpone_group.add_argument(
+        "--until",
+        "-u",
+        help="Defer EV charging until local HH:MM or ISO-8601 timestamp (e.g. 16:00).",
+    )
+    postpone_group.add_argument(
+        "--clear",
+        action="store_true",
+        default=False,
+        help="Clear an existing EV charging postponement for the vehicle.",
+    )
+    postpone_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Simulate the immediate replan without modifying Deye inverter settings.",
+    )
+    postpone_parser.add_argument(
+        "--no-run",
+        action="store_true",
+        default=False,
+        help="Persist postponement in state without running an immediate replan cycle.",
+    )
+
     return parser
 
 
@@ -201,6 +237,9 @@ def _poll_vehicles_gracefully(
         device_code_url=settings.cardata_device_code_url,
         transport=transport,
         token_store=token_store,
+        home_latitude=settings.solar_latitude,
+        home_longitude=settings.solar_longitude,
+        home_radius_meters=settings.home_radius_meters,
     ) as client:
         for veh in vehicles:
             try:
@@ -220,6 +259,7 @@ def _poll_vehicles_gracefully(
 def execute_run(
     settings: Settings,
     force_dry_run: bool = False,
+    force_deye_replan: bool = False,
     transports: Mapping[ServiceName, httpx.BaseTransport] | None = None,
     modbus_factory: Callable[..., Any] | None = None,
     smtp_factory: Callable[..., Any] | None = None,
@@ -313,7 +353,12 @@ def execute_run(
             transport=transport_map.get("cardata"),
         )
 
-        # Clear alert cooldown state for vehicles that recharged above threshold
+        # Reconcile polled EV telemetry and expired postponements against alert state
+        for key in list(state.vehicle_alerts.keys()):
+            rec_state = state.vehicle_alerts[key]
+            if rec_state.postponed_until is not None and rec_state.postponed_until <= current_time:
+                StateStore.clear_vehicle_postponement(state, key)
+
         for veh in vehicles:
             threshold = (
                 settings.bmw_soc_threshold
@@ -322,6 +367,11 @@ def execute_run(
             )
             if not veh.is_charging and veh.soc_pct > threshold:
                 StateStore.clear_vehicle_alert(state, veh.vehicle_key)
+            elif veh.is_charging and veh.is_at_home is not False:
+                rec_state = state.vehicle_alerts.get(veh.vehicle_key)
+                if rec_state is not None:
+                    rec_state.charged_in_window = True
+                    rec_state.postponed_until = None
 
         with _open_inverter_client(
             settings=settings,
@@ -330,6 +380,14 @@ def execute_run(
         ) as deye_client:
             inverter_status = deye_client.get_status()
             tz = ZoneInfo(settings.timezone)
+            active_postponements = StateStore.active_postponements(state, current_time)
+            active_ev_windows = StateStore.active_ev_windows(state, current_time)
+            paused_vehicles = StateStore.paused_missed_vehicles(
+                state,
+                cooldown_hours=settings.alert_cooldown_hours,
+                max_missed_renotifications=settings.max_missed_ev_renotifications,
+                now=current_time,
+            )
             fresh_plan = plan_charging_schedule(
                 settings=settings,
                 inverter=inverter_status,
@@ -337,6 +395,9 @@ def execute_run(
                 solar_forecast=solar_forecast,
                 vehicles=vehicles,
                 now=current_time,
+                postponed_vehicles=active_postponements,
+                active_ev_windows=active_ev_windows,
+                paused_vehicles=paused_vehicles,
             )
             replan_deye, deye_plan_reason = should_replan_deye_schedule(
                 fresh_plan=fresh_plan,
@@ -346,6 +407,7 @@ def execute_run(
                 effective_dry_run=effective_dry_run,
                 now=current_time,
                 tz=tz,
+                force_replan=force_deye_replan,
             )
             current_price_horizon = max((s.end for s in price_slots), default=None)
             if replan_deye:
@@ -390,6 +452,7 @@ def execute_run(
                 cooldown_hours=settings.alert_cooldown_hours,
                 dry_run=effective_dry_run,
                 now=current_time,
+                max_missed_renotifications=settings.max_missed_ev_renotifications,
             )
 
             logger.info(
@@ -440,6 +503,9 @@ def execute_run(
                         soc=rec.soc_pct,
                         recommended_window=rec.recommended_window,
                         now=current_time,
+                        window_start=rec.slots[0].start if rec.slots else None,
+                        window_end=rec.slots[-1].end if rec.slots else None,
+                        is_missed_followup=(rec.vehicle_key in decision.missed_followup_counts),
                     )
 
         logger.info(
@@ -504,8 +570,102 @@ def execute_status(settings: Settings) -> int:
     print(f"  Last run status: {state.last_run_status or 'n/a'}")
     horizon_str = state.deye_plan_horizon_end.isoformat() if state.deye_plan_horizon_end else "none"
     print(f"  Deye plan horizon: {horizon_str}")
+    tz = ZoneInfo(settings.timezone)
+    for key in sorted(state.vehicle_alerts):
+        rec = state.vehicle_alerts[key]
+        parts: list[str] = []
+        if rec.recommended_window:
+            parts.append(f"window={rec.recommended_window}")
+        if rec.missed_window_count:
+            parts.append(f"missed={rec.missed_window_count}")
+        if rec.postponed_until is not None:
+            parts.append(f"postponed_until={rec.postponed_until.astimezone(tz).isoformat()}")
+        if parts:
+            print(f"  EV [{key}]:       {', '.join(parts)}")
     print(f"  Missing config:  {', '.join(missing) if missing else 'none'}")
     return 0
+
+
+def parse_postpone_until(raw: str, now: datetime, tz: ZoneInfo) -> datetime:
+    """Parse `--until` as `HH:MM` (next occurrence in `tz`) or ISO-8601 timestamp."""
+    text = raw.strip()
+    if not text:
+        raise ValueError("Postpone target cannot be empty")
+    local_now = now.astimezone(tz)
+    if len(text) == 5 and text[2] == ":" and text[:2].isdigit() and text[3:].isdigit():
+        hour = int(text[:2])
+        minute = int(text[3:])
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError(f"Invalid HH:MM time: {raw!r}")
+        candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= local_now:
+            candidate += timedelta(days=1)
+        return candidate
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(
+            f"Expected HH:MM or ISO datetime (e.g. 16:00 or 2026-11-22T16:00), got {raw!r}"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=tz)
+    else:
+        parsed = parsed.astimezone(tz)
+    if parsed <= local_now:
+        raise ValueError(
+            f"Postpone target {parsed.isoformat()} must be in the future "
+            f"(now={local_now.isoformat()})"
+        )
+    return parsed
+
+
+def execute_postpone(
+    settings: Settings,
+    vehicle_key: Literal["bmw", "mini"],
+    until_raw: str | None = None,
+    clear: bool = False,
+    force_dry_run: bool = False,
+    no_run: bool = False,
+    now: datetime | None = None,
+    transports: Mapping[ServiceName, httpx.BaseTransport] | None = None,
+    modbus_factory: Callable[..., Any] | None = None,
+    smtp_factory: Callable[..., Any] | None = None,
+) -> int:
+    """Persist or clear an EV charging postponement and optionally trigger a replan."""
+    current_time = now or datetime.now(tz=UTC)
+    tz = ZoneInfo(settings.timezone)
+    store = StateStore(settings.state_file)
+    state = store.load()
+    display_name = "BMW" if vehicle_key == "bmw" else "MINI"
+
+    if clear:
+        StateStore.clear_vehicle_postponement(state, vehicle_key)
+        store.save(state)
+        print(f"Cleared EV charging postponement for {display_name}.")
+    else:
+        if until_raw is None:
+            print("[FAIL] Either --until or --clear must be provided.")
+            return 2
+        try:
+            until_dt = parse_postpone_until(until_raw, current_time, tz)
+        except ValueError as exc:
+            print(f"[FAIL] Invalid --until value: {exc}")
+            return 2
+        StateStore.set_vehicle_postponement(state, vehicle_key, until_dt)
+        store.save(state)
+        print(f"Postponed {display_name} EV charging until {until_dt.isoformat()}.")
+
+    if no_run:
+        return 0
+    return execute_run(
+        settings,
+        force_dry_run=force_dry_run,
+        force_deye_replan=True,
+        transports=transports,
+        modbus_factory=modbus_factory,
+        smtp_factory=smtp_factory,
+        now=current_time,
+    )
 
 
 def execute_probe(settings: Settings, target: ProbeTarget = "all") -> int:
@@ -669,6 +829,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return execute_probe(settings, target=args.service)
     if args.command == "cardata-auth":
         return execute_cardata_auth(settings, vehicle_target=args.vehicle)
+    if args.command == "postpone":
+        return execute_postpone(
+            settings,
+            vehicle_key=args.vehicle,
+            until_raw=args.until,
+            clear=args.clear,
+            force_dry_run=args.dry_run,
+            no_run=args.no_run,
+        )
 
     parser.print_help()
     return 2

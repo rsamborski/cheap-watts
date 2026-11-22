@@ -77,17 +77,22 @@ def build_cycle_email(
             avg_price = (
                 sum(s.price_pln_kwh for s in rec.slots) / len(rec.slots) if rec.slots else 0.0
             )
+            followup_num = decision.missed_followup_counts.get(rec.vehicle_key)
+            followup_suffix = (
+                f" [missed previous window — follow-up #{followup_num}]" if followup_num else ""
+            )
             if rec.mode == "solar_slow":
                 amps_label = f"{rec.recommended_amps}A slow-charge on PV surplus"
                 body_lines.append(
                     f"  * {rec.display_name}: SoC {rec.soc_pct}% (<= {rec.threshold_pct}%) -> "
                     f"Window {rec.recommended_window} ({amps_label}, avg {avg_price:.4f} PLN/kWh)"
+                    f"{followup_suffix}"
                 )
             else:
                 body_lines.append(
                     f"  * {rec.display_name}: SoC {rec.soc_pct}% (<= {rec.threshold_pct}%) -> "
                     f"Window {rec.recommended_window} (cheapest grid tariff, "
-                    f"avg {avg_price:.4f} PLN/kWh)"
+                    f"avg {avg_price:.4f} PLN/kWh){followup_suffix}"
                 )
         body_lines.append("")
 

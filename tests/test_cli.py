@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
 
 from src.clients.cardata import CarDataTokenStore
 from src.config import Settings
-from src.main import app_main, execute_cardata_auth, main
+from src.main import app_main, execute_cardata_auth, execute_postpone, main, parse_postpone_until
 from src.probe import run_probes
 from src.state import StateStore
 
@@ -226,3 +228,80 @@ def test_dockerfile_does_not_default_to_run_command() -> None:
     ]
     assert 'ENTRYPOINT ["cheap-watts"]' in instructions
     assert not any(line.startswith("CMD") for line in instructions)
+
+
+def test_cli_postpone_until_clear_no_run_and_status(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    warsaw = ZoneInfo("Europe/Warsaw")
+    now = datetime(2026, 11, 22, 11, 0, tzinfo=warsaw)
+
+    assert parse_postpone_until("16:00", now, warsaw) == datetime(
+        2026, 11, 22, 16, 0, tzinfo=warsaw
+    )
+    assert parse_postpone_until("10:00", now, warsaw) == datetime(
+        2026, 11, 23, 10, 0, tzinfo=warsaw
+    )
+    assert parse_postpone_until("2026-11-23T08:30", now, warsaw) == datetime(
+        2026, 11, 23, 8, 30, tzinfo=warsaw
+    )
+    for invalid in ("", "25:99", "not-a-time", "2026-11-22T09:00"):
+        with pytest.raises(ValueError):
+            parse_postpone_until(invalid, now, warsaw)
+
+    log_dir = tmp_path / "logs"
+    state_file = tmp_path / "data" / "state.json"
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"LOG_DIR={log_dir.as_posix()}\nSTATE_FILE={state_file.as_posix()}\nTIMEZONE=Europe/Warsaw\n",
+        encoding="utf-8",
+    )
+
+    rc_cli = main(
+        [
+            "--env-file",
+            str(env_file),
+            "postpone",
+            "-v",
+            "mini",
+            "--until",
+            "2099-01-01T16:00",
+            "--no-run",
+        ]
+    )
+    out_cli = capsys.readouterr().out
+    assert rc_cli == 0
+    assert "Postponed MINI EV charging until 2099-01-01T16:00:00+01:00" in out_cli
+
+    rc_status = main(["--env-file", str(env_file), "status"])
+    out_status = capsys.readouterr().out
+    assert rc_status == 0
+    assert "EV [mini]:" in out_status
+    assert "postponed_until=2099-01-01T16:00:00+01:00" in out_status
+
+    settings = Settings(
+        _env_file=None,
+        log_dir=log_dir,
+        state_file=state_file,
+        timezone="Europe/Warsaw",
+    )
+    rc_bad = execute_postpone(settings, vehicle_key="mini", until_raw="99:99", no_run=True, now=now)
+    assert rc_bad == 2
+    assert "Invalid --until value" in capsys.readouterr().out
+
+    # Calling postpone with immediate run triggers execute_run (cleanly skips unconfigured)
+    rc_run = execute_postpone(
+        settings, vehicle_key="mini", until_raw="16:00", no_run=False, now=now
+    )
+    _clear_app_loggers()
+    assert rc_run == 0
+    saved = StateStore(state_file).load()
+    assert saved.vehicle_alerts["mini"].postponed_until == datetime(
+        2026, 11, 22, 16, 0, tzinfo=warsaw
+    )
+
+    rc_clear = main(["--env-file", str(env_file), "postpone", "-v", "mini", "--clear", "--no-run"])
+    assert rc_clear == 0
+    assert "Cleared EV charging postponement for MINI." in capsys.readouterr().out
+    assert "mini" not in StateStore(state_file).load().vehicle_alerts

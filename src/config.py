@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     bmw_soc_threshold: int = Field(default=20, ge=5, le=95)
     mini_soc_threshold: int = Field(default=40, ge=5, le=95)
     ev_slow_charge_amps: int = Field(default=8, ge=6, le=16)
+    home_radius_meters: float = Field(default=200.0, gt=0.0, le=10_000.0)
 
     # --- Solar / PV Forecast ---
     solar_base_url: str = "https://api.open-meteo.com"
@@ -85,6 +86,7 @@ class Settings(BaseSettings):
     state_file: Path = Path("data/state.json")
     cardata_tokens_file: Path = Path("data/cardata_tokens.json")
     alert_cooldown_hours: float = Field(default=12.0, ge=0.0)
+    max_missed_ev_renotifications: int = Field(default=3, ge=0, le=20)
 
     @field_validator(
         "pstryk_api_key",

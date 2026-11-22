@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import os
 import secrets
 import time
@@ -38,8 +39,9 @@ _TELEMATIC_PATH_TEMPLATE = "/customers/vehicles/{vin}/telematicData"
 _DEVICE_CODE_SCOPE = "authenticate_user openid cardata:api:read"
 _DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 
-_CONTAINER_NAME = "cheap-watts"
-_CONTAINER_PURPOSE = "EV battery SoC and charging status for home energy optimization"
+_CONTAINER_NAME = "cheap-watts-v2"
+_CONTAINER_VERSION = 2
+_CONTAINER_PURPOSE = "EV battery SoC, location, and charging status for home energy optimization"
 _DEFAULT_CONTAINER_DESCRIPTORS: tuple[str, ...] = (
     "vehicle.drivetrain.batteryManagement.header",
     "vehicle.drivetrain.electricEngine.charging.level",
@@ -47,6 +49,8 @@ _DEFAULT_CONTAINER_DESCRIPTORS: tuple[str, ...] = (
     "vehicle.drivetrain.electricEngine.charging.status",
     "vehicle.drivetrain.electricEngine.charging.timeRemaining",
     "vehicle.body.chargingPort.status",
+    "vehicle.cabin.infotainment.navigation.currentLocation.latitude",
+    "vehicle.cabin.infotainment.navigation.currentLocation.longitude",
 )
 _CORE_CONTAINER_DESCRIPTORS: tuple[str, ...] = (
     "vehicle.drivetrain.batteryManagement.header",
@@ -84,6 +88,29 @@ _TIME_REMAINING_KEYS = (
     "vehicle.drivetrain.electricEngine.charging.timeRemaining",
     "timeRemaining",
 )
+_LATITUDE_KEYS = (
+    "vehicle.cabin.infotainment.navigation.currentLocation.latitude",
+    "vehicle.position.latitude",
+    "latitude",
+)
+_LONGITUDE_KEYS = (
+    "vehicle.cabin.infotainment.navigation.currentLocation.longitude",
+    "vehicle.position.longitude",
+    "longitude",
+)
+
+
+def haversine_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Compute great-circle Haversine distance in meters between two WGS84 points."""
+    earth_radius_m = 6_371_000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lam = math.radians(lon2 - lon1)
+    a = math.sin(d_phi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lam / 2.0) ** 2
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
+    return earth_radius_m * c
+
 
 _ACTIVE_CHARGING_VALUES = frozenset(
     {
@@ -143,6 +170,7 @@ class CarDataTokenRecord(BaseModel):
     client_id: str | None = None
     vin: str | None = None
     container_id: str | None = None
+    container_version: int = _CONTAINER_VERSION
     updated_at: datetime | None = None
 
     def has_valid_access_token(
@@ -177,7 +205,10 @@ class CarDataTokenStore:
         records: dict[str, CarDataTokenRecord] = {}
         for key, item in vehicles_raw.items():
             if isinstance(item, dict) and item.get("access_token"):
-                records[str(key)] = CarDataTokenRecord.model_validate(item)
+                normalized = dict(item)
+                if "container_version" not in normalized and normalized.get("container_id"):
+                    normalized["container_version"] = 1
+                records[str(key)] = CarDataTokenRecord.model_validate(normalized)
         return records
 
     def get(self, vehicle_key: str) -> CarDataTokenRecord | None:
@@ -204,6 +235,7 @@ class CarDataTokenStore:
                 "client_id": rec.client_id,
                 "vin": rec.vin,
                 "container_id": rec.container_id,
+                "container_version": rec.container_version,
                 "updated_at": rec.updated_at.isoformat() if rec.updated_at else None,
             }
         payload = json.dumps({"vehicles": serialized_vehicles}, indent=2)
@@ -307,11 +339,17 @@ class CarDataClient:
         timeout: float = 15.0,
         transport: httpx.BaseTransport | None = None,
         token_store: CarDataTokenStore | None = None,
+        home_latitude: float | None = None,
+        home_longitude: float | None = None,
+        home_radius_meters: float = 200.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._token_url = token_url
         self._device_code_url = device_code_url
         self._token_store = token_store
+        self._home_latitude = home_latitude
+        self._home_longitude = home_longitude
+        self._home_radius_meters = home_radius_meters
         self._token_cache: dict[str, str] = {}
         self._client = httpx.Client(
             timeout=timeout,
@@ -596,6 +634,29 @@ class CarDataClient:
                 else None
             )
         )
+        if (
+            config.container_id is None
+            and stored is not None
+            and stored.container_id is not None
+            and stored.container_version < _CONTAINER_VERSION
+        ):
+            try:
+                container_id = self.ensure_container(token)
+                self._persist_metadata_if_applicable(
+                    config,
+                    vin=vin,
+                    container_id=container_id,
+                    container_version=_CONTAINER_VERSION,
+                )
+            except ApiClientError as exc:
+                logger.warning(
+                    "Failed to upgrade CarData container to v2; continuing with existing container",
+                    extra={
+                        "event": "cardata_container_upgrade_failed",
+                        "vehicle": config.vehicle_key,
+                        "error": str(exc),
+                    },
+                )
 
         response = self._get_telematic_response(
             token=token,
@@ -605,7 +666,12 @@ class CarDataClient:
         )
         if response.status_code == 400 and container_id is None:
             container_id = self.ensure_container(token)
-            self._persist_metadata_if_applicable(config, vin=vin, container_id=container_id)
+            self._persist_metadata_if_applicable(
+                config,
+                vin=vin,
+                container_id=container_id,
+                container_version=_CONTAINER_VERSION,
+            )
             response = self._get_telematic_response(
                 token=token,
                 vin=vin,
@@ -640,6 +706,23 @@ class CarDataClient:
             plug_str in _CONNECTED_PLUG_VALUES if plug_str is not None else False
         )
 
+        lat = self._parse_optional_float(_first_present(data, _LATITUDE_KEYS), -90.0, 90.0)
+        lon = self._parse_optional_float(_first_present(data, _LONGITUDE_KEYS), -180.0, 180.0)
+        distance_from_home_m: float | None = None
+        is_at_home: bool | None = None
+        if (
+            lat is not None
+            and lon is not None
+            and not (lat == 0.0 and lon == 0.0)
+            and self._home_latitude is not None
+            and self._home_longitude is not None
+        ):
+            distance_from_home_m = round(
+                haversine_distance_m(self._home_latitude, self._home_longitude, lat, lon),
+                1,
+            )
+            is_at_home = distance_from_home_m <= self._home_radius_meters
+
         status = VehicleStatus(
             vehicle_key=config.vehicle_key,
             display_name=config.display_name,
@@ -650,6 +733,8 @@ class CarDataClient:
             charging_status_raw=charging_str,
             target_soc_pct=target_soc_pct,
             time_remaining_minutes=time_remaining,
+            distance_from_home_m=distance_from_home_m,
+            is_at_home=is_at_home,
             fetched_at=datetime.now(tz=UTC),
         )
         logger.info(
@@ -660,6 +745,8 @@ class CarDataClient:
                 "soc_pct": status.soc_pct,
                 "is_plugged_in": status.is_plugged_in,
                 "is_charging": status.is_charging,
+                "is_at_home": status.is_at_home,
+                "distance_from_home_m": status.distance_from_home_m,
             },
         )
         return status
@@ -715,6 +802,7 @@ class CarDataClient:
         config: CarDataVehicleConfig,
         vin: str,
         container_id: str,
+        container_version: int = _CONTAINER_VERSION,
     ) -> None:
         record = self._load_compatible_record(config)
         if record is None or self._token_store is None:
@@ -723,6 +811,7 @@ class CarDataClient:
             update={
                 "vin": vin,
                 "container_id": container_id,
+                "container_version": container_version,
                 "updated_at": datetime.now(tz=UTC),
             }
         )
@@ -795,6 +884,7 @@ class CarDataClient:
                     client_id=config.client_id,
                     vin=config.vin or (stored.vin if stored else None),
                     container_id=config.container_id or (stored.container_id if stored else None),
+                    container_version=(stored.container_version if stored else _CONTAINER_VERSION),
                     updated_at=now,
                 ),
             )
@@ -855,6 +945,20 @@ class CarDataClient:
         try:
             parsed = int(round(float(raw)))
         except (TypeError, ValueError):
+            return None
+        if min_val <= parsed <= max_val:
+            return parsed
+        return None
+
+    @staticmethod
+    def _parse_optional_float(raw: Any, min_val: float, max_val: float) -> float | None:
+        if raw is None:
+            return None
+        try:
+            parsed = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed):
             return None
         if min_val <= parsed <= max_val:
             return parsed

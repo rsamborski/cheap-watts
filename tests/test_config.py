@@ -17,6 +17,8 @@ def test_env_example_loads_cleanly_with_blank_values() -> None:
     assert settings.solar_latitude is None
     assert settings.bmw_soc_threshold == 20
     assert settings.mini_soc_threshold == 40
+    assert settings.home_radius_meters == 200.0
+    assert settings.max_missed_ev_renotifications == 3
     assert settings.dry_run is False
     assert "PSTRYK_API_KEY" in settings.missing_live_settings()
 
