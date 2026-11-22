@@ -18,6 +18,7 @@ from src.clients.errors import ApiClientError
 from src.clients.pstryk import PstrykClient
 from src.clients.solar import SolarArray, SolarForecastClient
 from src.config import Settings
+from src.models import PriceSlot
 
 logger = logging.getLogger("cheap_watts.probe")
 
@@ -66,10 +67,22 @@ def build_cardata_vehicles(settings: Settings) -> list[CarDataVehicleConfig]:
     ]
 
 
+def _format_pstryk_slot_line(slot: PriceSlot, tz: ZoneInfo, now_local: datetime) -> str:
+    s_loc = slot.start.astimezone(tz)
+    e_loc = slot.end.astimezone(tz)
+    net_part = f" (net {slot.price_net_pln_kwh:.4f})" if slot.price_net_pln_kwh is not None else ""
+    marker = " <-- now" if s_loc <= now_local < e_loc else ""
+    return (
+        f"  {s_loc.strftime('%Y-%m-%d %H:%M')}-{e_loc.strftime('%H:%M')}  "
+        f"{slot.price_pln_kwh:.4f} {slot.currency}/kWh{net_part}{marker}"
+    )
+
+
 def probe_pstryk(
     settings: Settings,
     transport: httpx.BaseTransport | None = None,
     reference_time: datetime | None = None,
+    verbose: bool = False,
 ) -> ProbeResult:
     """Probe Pstryk dynamic hourly electricity tariffs (read-only)."""
     if settings.pstryk_api_key is None:
@@ -99,8 +112,12 @@ def probe_pstryk(
         )
         return ProbeResult(service="pstryk", status="failed", headline=str(exc))
 
-    today_slots = [s for s in slots if s.start.date() == today_date]
-    tomorrow_slots = [s for s in slots if s.start.date() == tomorrow_date]
+    ordered_slots = sorted(slots, key=lambda s: s.start)
+    today_slots = [s for s in ordered_slots if s.start.astimezone(tz).date() == today_date]
+    tomorrow_slots = [s for s in ordered_slots if s.start.astimezone(tz).date() == tomorrow_date]
+    other_slots = [
+        s for s in ordered_slots if s.start.astimezone(tz).date() not in (today_date, tomorrow_date)
+    ]
 
     details: list[str] = []
     if today_slots:
@@ -112,6 +129,8 @@ def probe_pstryk(
             f"min={cheapest_today.price_pln_kwh:.4f} ({cheapest_today.start.strftime('%H:%M')}) | "
             f"avg={avg_today:.4f} | max={max_today:.4f} PLN/kWh"
         )
+        if verbose:
+            details.extend(_format_pstryk_slot_line(s, tz, now_local) for s in today_slots)
     else:
         details.append(f"Today ({today_date}): 0 slots returned")
 
@@ -124,8 +143,14 @@ def probe_pstryk(
             f"min={cheapest_tmr.price_pln_kwh:.4f} ({cheapest_tmr.start.strftime('%H:%M')}) | "
             f"avg={avg_tmr:.4f} | max={max_tmr:.4f} PLN/kWh"
         )
+        if verbose:
+            details.extend(_format_pstryk_slot_line(s, tz, now_local) for s in tomorrow_slots)
     else:
         details.append(f"Tomorrow ({tomorrow_date}): not yet published (expected after ~14:00 CET)")
+
+    if verbose and other_slots:
+        details.append("Other returned slots:")
+        details.extend(_format_pstryk_slot_line(s, tz, now_local) for s in other_slots)
 
     return ProbeResult(
         service="pstryk",
@@ -431,6 +456,7 @@ def run_probes(
     transports: Mapping[ServiceName, httpx.BaseTransport] | None = None,
     reference_time: datetime | None = None,
     modbus_factory: Callable[..., Any] | None = None,
+    verbose: bool = False,
 ) -> list[ProbeResult]:
     """Execute read-only probes for the requested service(s)."""
     selected: Sequence[ServiceName] = ALL_SERVICES if target == "all" else (target,)
@@ -441,7 +467,12 @@ def run_probes(
         svc_transport = transport_map.get(service)
         if service == "pstryk":
             results.append(
-                probe_pstryk(settings, transport=svc_transport, reference_time=reference_time)
+                probe_pstryk(
+                    settings,
+                    transport=svc_transport,
+                    reference_time=reference_time,
+                    verbose=verbose,
+                )
             )
         elif service == "solar":
             results.append(

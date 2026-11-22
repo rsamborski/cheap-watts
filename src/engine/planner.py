@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Literal
 from zoneinfo import ZoneInfo
 
 from src.config import Settings
@@ -96,12 +95,11 @@ def _select_solar_ev_window(
     )
 
 
-def _select_cheap_ev_window(
+def _candidate_ev_slices(
     available: Sequence[PriceSlot],
-    deye_hours_needed: int,
     desired_hours: int = _DEFAULT_EV_GRID_HOURS,
-) -> list[PriceSlot]:
-    """Select the cheapest contiguous EV window while preserving post-EV room when possible."""
+) -> list[list[PriceSlot]]:
+    """Return all contiguous candidate EV charging slices from `available`."""
     if not available:
         return []
 
@@ -109,30 +107,35 @@ def _select_cheap_ev_window(
     max_run_len = max(len(r) for r in runs)
     win_len = min(desired_hours, max_run_len)
 
-    all_slices: list[list[PriceSlot]] = []
+    slices: list[list[PriceSlot]] = []
     for run in runs:
         if len(run) < win_len:
             continue
         for idx in range(len(run) - win_len + 1):
-            all_slices.append(run[idx : idx + win_len])
+            slices.append(run[idx : idx + win_len])
+    return slices
 
-    if deye_hours_needed > 0:
-        min_post_slots = min(deye_hours_needed, max(0, len(available) - win_len))
-        leaving_room = [
-            sl
-            for sl in all_slices
-            if sum(1 for s in available if s.start >= sl[-1].end) >= min_post_slots
-        ]
-        if leaving_room:
-            all_slices = leaving_room
 
-    return min(
-        all_slices,
-        key=lambda sl: (
-            round(sum(s.price_pln_kwh for s in sl), 6),
-            sl[0].start.timestamp(),
-        ),
-    )
+def _deye_weighted_unit_price(
+    windows: Sequence[Sequence[PriceSlot]],
+    deficit_kwh: float,
+    max_charge_kw: float,
+) -> float:
+    """Compute kWh-weighted average unit price across chronologically ordered Deye slots."""
+    if not windows or deficit_kwh <= 0.0:
+        return 0.0
+    slots = sorted((s for w in windows for s in w), key=lambda s: s.start)
+    remaining = deficit_kwh
+    weighted_sum = 0.0
+    charged = 0.0
+    for slot in slots:
+        if remaining <= 0.0:
+            break
+        take = min(max_charge_kw, remaining)
+        weighted_sum += take * slot.price_pln_kwh
+        charged += take
+        remaining -= take
+    return weighted_sum / charged if charged > 0.0 else 0.0
 
 
 def _clock_intervals_for_slot(
@@ -533,9 +536,10 @@ def plan_charging_schedule(
     expected_pv_kwh = solar_forecast.effective_kwh_between(current_time, horizon_end)
     solar_sufficient = expected_pv_kwh >= settings.solar_sufficient_kwh_threshold
 
+    prelim_deye_deficit_kwh = 0.0
     prelim_deye_hours = 0
     if not solar_sufficient and upcoming_slots:
-        _, _, _, prelim_deye_hours, _ = _plan_deye_windows(
+        _, prelim_deye_deficit_kwh, _, prelim_deye_hours, _ = _plan_deye_windows(
             settings=settings,
             current_soc=inverter.battery_soc,
             candidates=upcoming_slots,
@@ -587,107 +591,285 @@ def plan_charging_schedule(
     else:
         reserved_starts: set[datetime] = set()
         reserved_slots_all: list[PriceSlot] = []
-        for idx, vehicle in enumerate(vehicles):
-            threshold = _vehicle_threshold(vehicle, settings)
-            if vehicle.soc_pct > threshold:
-                continue
-            if vehicle.is_at_home is False:
-                rationale_parts.append(
-                    f"{vehicle.display_name} ({vehicle.soc_pct}%<={threshold}%) "
-                    f"away from home ({_format_distance(vehicle.distance_from_home_m)}); "
-                    "deferred EV charging"
-                )
-                continue
-            if vehicle.vehicle_key in paused_set:
-                rationale_parts.append(
-                    f"{vehicle.display_name} ({vehicle.soc_pct}%<={threshold}%) "
-                    "paused after max missed windows; deferred EV charging"
-                )
-                continue
-
-            raw_cutoff = postponed_map.get(vehicle.vehicle_key)
-            cutoff_local = (
-                raw_cutoff.astimezone(tz)
-                if raw_cutoff is not None and raw_cutoff.astimezone(tz) > current_time
-                else None
-            )
-            available_for_ev = [
-                s
-                for s in upcoming_slots
-                if s.start not in reserved_starts
-                and (cutoff_local is None or s.start >= cutoff_local)
-            ]
-            if not available_for_ev:
-                if cutoff_local is not None:
+        if solar_sufficient:
+            for vehicle in vehicles:
+                threshold = _vehicle_threshold(vehicle, settings)
+                if vehicle.soc_pct > threshold:
+                    continue
+                if vehicle.is_at_home is False:
                     rationale_parts.append(
-                        f"{vehicle.display_name} postponed until "
-                        f"{cutoff_local.strftime('%Y-%m-%d %H:%M')}; "
-                        "no eligible slots in horizon yet"
+                        f"{vehicle.display_name} ({vehicle.soc_pct}%<={threshold}%) "
+                        f"away from home ({_format_distance(vehicle.distance_from_home_m)}); "
+                        "deferred EV charging"
                     )
-                continue
-
-            active_bounds = (
-                active_windows_map.get(vehicle.vehicle_key) if cutoff_local is None else None
-            )
-            chosen: list[PriceSlot] = []
-            mode: Literal["solar_slow", "grid_cheap"]
-            amps: int | None
-            win_str: str
-            if active_bounds is not None:
-                w_start = active_bounds[0].astimezone(tz)
-                w_end = active_bounds[1].astimezone(tz)
-                chosen = [s for s in available_for_ev if s.start < w_end and s.end > w_start]
-                if chosen:
-                    mode = "solar_slow" if solar_sufficient else "grid_cheap"
-                    amps = settings.ev_slow_charge_amps if solar_sufficient else None
-                    win_str = f"{w_start.strftime('%H:%M')}-{w_end.strftime('%H:%M')}"
-
-            if not chosen:
-                if solar_sufficient:
-                    chosen = _select_solar_ev_window(available_for_ev, solar_forecast)
-                    mode = "solar_slow"
-                    amps = settings.ev_slow_charge_amps
-                else:
-                    # Reserve post-EV room on the last/only EV recommendation if battery needs grid
-                    remaining_evs = sum(
-                        1
-                        for later in vehicles[idx + 1 :]
-                        if later.soc_pct <= _vehicle_threshold(later, settings)
-                        and later.is_at_home is not False
-                        and later.vehicle_key not in paused_set
+                    continue
+                if vehicle.vehicle_key in paused_set:
+                    rationale_parts.append(
+                        f"{vehicle.display_name} ({vehicle.soc_pct}%<={threshold}%) "
+                        "paused after max missed windows; deferred EV charging"
                     )
-                    extra_room = prelim_deye_hours + (remaining_evs * _DEFAULT_EV_GRID_HOURS)
-                    chosen = _select_cheap_ev_window(available_for_ev, deye_hours_needed=extra_room)
-                    mode = "grid_cheap"
-                    amps = None
+                    continue
+
+                raw_cutoff = postponed_map.get(vehicle.vehicle_key)
+                cutoff_local = (
+                    raw_cutoff.astimezone(tz)
+                    if raw_cutoff is not None and raw_cutoff.astimezone(tz) > current_time
+                    else None
+                )
+                available_for_ev = [
+                    s
+                    for s in upcoming_slots
+                    if s.start not in reserved_starts
+                    and (cutoff_local is None or s.start >= cutoff_local)
+                ]
+                if not available_for_ev:
+                    if cutoff_local is not None:
+                        rationale_parts.append(
+                            f"{vehicle.display_name} postponed until "
+                            f"{cutoff_local.strftime('%Y-%m-%d %H:%M')}; "
+                            "no eligible slots in horizon yet"
+                        )
+                    continue
+
+                active_bounds = (
+                    active_windows_map.get(vehicle.vehicle_key) if cutoff_local is None else None
+                )
+                chosen: list[PriceSlot] = []
+                win_str: str
+                if active_bounds is not None:
+                    w_start = active_bounds[0].astimezone(tz)
+                    w_end = active_bounds[1].astimezone(tz)
+                    chosen = [s for s in available_for_ev if s.start < w_end and s.end > w_start]
+                    if chosen:
+                        win_str = f"{w_start.strftime('%H:%M')}-{w_end.strftime('%H:%M')}"
 
                 if not chosen:
-                    continue
-                win_str = _format_window(chosen, tz)
-            ev_recommendations.append(
-                EvChargeRecommendation(
-                    vehicle_key=vehicle.vehicle_key,
-                    display_name=vehicle.display_name,
-                    soc_pct=vehicle.soc_pct,
-                    threshold_pct=threshold,
-                    mode=mode,
-                    recommended_window=win_str,
-                    slots=chosen,
-                    recommended_amps=amps,
+                    chosen = _select_solar_ev_window(available_for_ev, solar_forecast)
+                    if not chosen:
+                        continue
+                    win_str = _format_window(chosen, tz)
+
+                ev_recommendations.append(
+                    EvChargeRecommendation(
+                        vehicle_key=vehicle.vehicle_key,
+                        display_name=vehicle.display_name,
+                        soc_pct=vehicle.soc_pct,
+                        threshold_pct=threshold,
+                        mode="solar_slow",
+                        recommended_window=win_str,
+                        slots=chosen,
+                        recommended_amps=settings.ev_slow_charge_amps,
+                    )
                 )
-            )
-            for s in chosen:
-                reserved_starts.add(s.start)
-                reserved_slots_all.append(s)
-            postpone_note = (
-                f" (postponed >= {cutoff_local.strftime('%H:%M')})"
-                if cutoff_local is not None
-                else ""
-            )
-            rationale_parts.append(
-                f"Recommend {vehicle.display_name} ({vehicle.soc_pct}%<={threshold}%) "
-                f"{mode} {win_str}{postpone_note}"
-            )
+                for s in chosen:
+                    reserved_starts.add(s.start)
+                    reserved_slots_all.append(s)
+                postpone_note = (
+                    f" (postponed >= {cutoff_local.strftime('%H:%M')})"
+                    if cutoff_local is not None
+                    else ""
+                )
+                rationale_parts.append(
+                    f"Recommend {vehicle.display_name} ({vehicle.soc_pct}%<={threshold}%) "
+                    f"solar_slow {win_str}{postpone_note}"
+                )
+        else:
+            pinned_entries: list[
+                tuple[int, VehicleStatus, int, datetime | None, list[PriceSlot], str]
+            ] = []
+            deferred_specs: list[tuple[int, VehicleStatus, int, datetime | None]] = []
+
+            for idx, vehicle in enumerate(vehicles):
+                threshold = _vehicle_threshold(vehicle, settings)
+                if vehicle.soc_pct > threshold:
+                    continue
+                if vehicle.is_at_home is False:
+                    rationale_parts.append(
+                        f"{vehicle.display_name} ({vehicle.soc_pct}%<={threshold}%) "
+                        f"away from home ({_format_distance(vehicle.distance_from_home_m)}); "
+                        "deferred EV charging"
+                    )
+                    continue
+                if vehicle.vehicle_key in paused_set:
+                    rationale_parts.append(
+                        f"{vehicle.display_name} ({vehicle.soc_pct}%<={threshold}%) "
+                        "paused after max missed windows; deferred EV charging"
+                    )
+                    continue
+
+                raw_cutoff = postponed_map.get(vehicle.vehicle_key)
+                cutoff_local = (
+                    raw_cutoff.astimezone(tz)
+                    if raw_cutoff is not None and raw_cutoff.astimezone(tz) > current_time
+                    else None
+                )
+                available_for_pinned = [
+                    s
+                    for s in upcoming_slots
+                    if s.start not in reserved_starts
+                    and (cutoff_local is None or s.start >= cutoff_local)
+                ]
+                active_bounds = (
+                    active_windows_map.get(vehicle.vehicle_key) if cutoff_local is None else None
+                )
+                if active_bounds is not None and available_for_pinned:
+                    w_start = active_bounds[0].astimezone(tz)
+                    w_end = active_bounds[1].astimezone(tz)
+                    chosen_pinned = [
+                        s for s in available_for_pinned if s.start < w_end and s.end > w_start
+                    ]
+                    if chosen_pinned:
+                        win_str = f"{w_start.strftime('%H:%M')}-{w_end.strftime('%H:%M')}"
+                        for s in chosen_pinned:
+                            reserved_starts.add(s.start)
+                            reserved_slots_all.append(s)
+                        pinned_entries.append(
+                            (idx, vehicle, threshold, cutoff_local, chosen_pinned, win_str)
+                        )
+                        continue
+                deferred_specs.append((idx, vehicle, threshold, cutoff_local))
+
+            flexible_entries: list[
+                tuple[int, VehicleStatus, int, datetime | None, list[list[PriceSlot]]]
+            ] = []
+            for idx, vehicle, threshold, cutoff_local in deferred_specs:
+                available_for_ev = [
+                    s
+                    for s in upcoming_slots
+                    if s.start not in reserved_starts
+                    and (cutoff_local is None or s.start >= cutoff_local)
+                ]
+                if not available_for_ev:
+                    if cutoff_local is not None:
+                        rationale_parts.append(
+                            f"{vehicle.display_name} postponed until "
+                            f"{cutoff_local.strftime('%Y-%m-%d %H:%M')}; "
+                            "no eligible slots in horizon yet"
+                        )
+                    continue
+                slices = _candidate_ev_slices(available_for_ev)
+                if slices:
+                    flexible_entries.append((idx, vehicle, threshold, cutoff_local, slices))
+
+            assignments: list[tuple[list[PriceSlot], ...]] = []
+            if len(flexible_entries) == 1:
+                assignments = [(sl,) for sl in flexible_entries[0][4]]
+            elif len(flexible_entries) >= 2:
+                if len(flexible_entries) > 2:
+                    flexible_entries = flexible_entries[:2]
+                assignments = [
+                    (sl0, sl1)
+                    for sl0 in flexible_entries[0][4]
+                    for sl1 in flexible_entries[1][4]
+                    if {s.start for s in sl0}.isdisjoint({s.start for s in sl1})
+                ]
+                if not assignments:
+                    flexible_entries = flexible_entries[:1]
+                    assignments = [(sl0,) for sl0 in flexible_entries[0][4]]
+
+            chosen_flexible: list[
+                tuple[int, VehicleStatus, int, datetime | None, list[PriceSlot], str]
+            ] = []
+            if assignments:
+                deye_cache: dict[datetime, tuple[list[list[PriceSlot]], float, int, int, int]] = {}
+                for combo in assignments:
+                    cutoff_dt = max(
+                        s.end for s in (*reserved_slots_all, *(s for sl in combo for s in sl))
+                    )
+                    if cutoff_dt in deye_cache:
+                        continue
+                    after_slots = [s for s in upcoming_slots if s.start >= cutoff_dt]
+                    if after_slots:
+                        deye_cache[cutoff_dt] = _plan_deye_windows(
+                            settings=settings,
+                            current_soc=inverter.battery_soc,
+                            candidates=after_slots,
+                            solar_forecast=solar_forecast,
+                            current_time=current_time,
+                            tz=tz,
+                        )
+                    else:
+                        deye_cache[cutoff_dt] = (
+                            [],
+                            prelim_deye_deficit_kwh,
+                            settings.battery_min_soc,
+                            prelim_deye_hours,
+                            inverter.battery_soc,
+                        )
+
+                ref_deye_kwh = max(
+                    [prelim_deye_deficit_kwh, *(v[1] for v in deye_cache.values())],
+                    default=0.0,
+                )
+                worst_price = max((s.price_pln_kwh for s in upcoming_slots), default=0.0)
+
+                def _combo_score(
+                    combo: tuple[list[PriceSlot], ...],
+                ) -> tuple[int, float, int, tuple[tuple[float, float], ...]]:
+                    cutoff_dt = max(
+                        s.end for s in (*reserved_slots_all, *(s for sl in combo for s in sl))
+                    )
+                    d_wins, d_def, _, d_hours, _ = deye_cache[cutoff_dt]
+                    unmet_deye_hours = max(0, d_hours - sum(len(w) for w in d_wins))
+                    ev_costs = [
+                        settings.ev_max_charge_kw * sum(s.price_pln_kwh for s in sl) for sl in combo
+                    ]
+                    if ref_deye_kwh > 0.0 and d_hours > 0:
+                        deye_unit = (
+                            _deye_weighted_unit_price(d_wins, d_def, settings.battery_max_charge_kw)
+                            if d_wins
+                            else worst_price
+                        )
+                        deye_cost = ref_deye_kwh * deye_unit
+                    else:
+                        deye_cost = 0.0
+                    total_cost = round(sum(ev_costs) + deye_cost, 6)
+                    ev_tie = tuple(
+                        (round(ev_costs[i], 6), combo[i][0].start.timestamp())
+                        for i in range(len(combo))
+                    )
+                    return (unmet_deye_hours, total_cost, len(d_wins), ev_tie)
+
+                best_combo = min(assignments, key=_combo_score)
+                for entry, chosen_slice in zip(flexible_entries, best_combo, strict=True):
+                    idx, vehicle, threshold, cutoff_local, _ = entry
+                    chosen_flexible.append(
+                        (
+                            idx,
+                            vehicle,
+                            threshold,
+                            cutoff_local,
+                            chosen_slice,
+                            _format_window(chosen_slice, tz),
+                        )
+                    )
+
+            all_selected = sorted((*pinned_entries, *chosen_flexible), key=lambda item: item[0])
+            for _, vehicle, threshold, cutoff_local, chosen, win_str in all_selected:
+                ev_recommendations.append(
+                    EvChargeRecommendation(
+                        vehicle_key=vehicle.vehicle_key,
+                        display_name=vehicle.display_name,
+                        soc_pct=vehicle.soc_pct,
+                        threshold_pct=threshold,
+                        mode="grid_cheap",
+                        recommended_window=win_str,
+                        slots=chosen,
+                        recommended_amps=None,
+                    )
+                )
+                for s in chosen:
+                    reserved_starts.add(s.start)
+                    reserved_slots_all.append(s)
+                postpone_note = (
+                    f" (postponed >= {cutoff_local.strftime('%H:%M')})"
+                    if cutoff_local is not None
+                    else ""
+                )
+                rationale_parts.append(
+                    f"Recommend {vehicle.display_name} ({vehicle.soc_pct}%<={threshold}%) "
+                    f"grid_cheap {win_str}{postpone_note}"
+                )
 
         if reserved_slots_all:
             blocked_ev_hours = sorted({s.start for s in reserved_slots_all})
@@ -905,6 +1087,14 @@ def should_replan_deye_schedule(
 
     if is_tou_grid_charging_at(locked_slots, local_now):
         return False, "active_charging_window_locked"
+
+    if any(
+        (rec_state := state.vehicle_alerts.get(rec.vehicle_key)) is not None
+        and rec_state.recommended_window is not None
+        and rec_state.recommended_window != rec.recommended_window
+        for rec in fresh_plan.ev_recommendations
+    ):
+        return True, "ev_window_changed"
 
     if not has_persisted or state.deye_plan_horizon_end is None:
         return True, "initial_plan"

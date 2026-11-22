@@ -253,7 +253,8 @@ def test_cli_probe_command_dispatches_and_sets_exit_code(
         "pstryk": httpx.MockTransport(lambda _r: httpx.Response(401, json={"detail": "denied"}))
     }
     with patch(
-        "src.main.run_probes", wraps=lambda s, target: run_probes(s, target, failing_transport)
+        "src.main.run_probes",
+        wraps=lambda s, target, **kw: run_probes(s, target, failing_transport, **kw),
     ):
         exit_fail = main(["--env-file", str(env_file), "probe", "-s", "pstryk"])
 
@@ -343,3 +344,67 @@ def test_probe_deye_prefers_local_solarman_v5_when_configured() -> None:
     assert results[0].status == "ok"
     assert "Battery SoC 68%" in results[0].headline
     assert any("Mode: local-lan (192.168.1.50:8899)" in d for d in results[0].details)
+
+
+def test_probe_pstryk_verbose_lists_all_price_slots(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    pstryk_bytes = (FIXTURES / "pstryk_unified_metrics.json").read_bytes()
+    ref_time = datetime(2026, 11, 15, 11, 30, tzinfo=UTC)
+    settings = Settings(
+        _env_file=None,
+        log_dir=tmp_path / "logs",
+        pstryk_api_key=SecretStr("test-api-key"),
+    )
+    transport = httpx.MockTransport(lambda _r: httpx.Response(200, content=pstryk_bytes))
+
+    # Non-verbose omits individual hourly slots
+    quiet_results = run_probes(
+        settings,
+        target="pstryk",
+        transports={"pstryk": transport},
+        reference_time=ref_time,
+        verbose=False,
+    )
+    assert len(quiet_results) == 1
+    assert not any("2026-11-15 12:00-13:00" in d for d in quiet_results[0].details)
+
+    # Verbose prints all hourly slots with net prices and `<-- now` marker
+    verbose_results = run_probes(
+        settings,
+        target="pstryk",
+        transports={"pstryk": transport},
+        reference_time=ref_time,
+        verbose=True,
+    )
+    report = format_probe_report(verbose_results, timezone=settings.timezone)
+    assert "2026-11-15 00:00-01:00  0.3444 PLN/kWh (net 0.2800)" in report
+    assert "2026-11-15 12:00-13:00  -0.0800 PLN/kWh (net -0.0650) <-- now" in report
+    assert "2026-11-16 00:00-01:00  0.2337 PLN/kWh (net 0.1900)" in report
+
+    # CLI `-s pstryk -v` forwards verbose=True through main()
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"LOG_DIR={(tmp_path / 'logs').as_posix()}\nPSTRYK_API_KEY=test-api-key\n",
+        encoding="utf-8",
+    )
+    with patch(
+        "src.main.run_probes",
+        wraps=lambda s, target, **kw: run_probes(
+            s,
+            target,
+            transports={"pstryk": transport},
+            reference_time=ref_time,
+            **kw,
+        ),
+    ):
+        rc = main(["--env-file", str(env_file), "probe", "-s", "pstryk", "-v"])
+
+    for handler in list(logging.getLogger("cheap_watts").handlers):
+        handler.close()
+    logging.getLogger("cheap_watts").handlers.clear()
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "2026-11-15 12:00-13:00  -0.0800 PLN/kWh (net -0.0650) <-- now" in out

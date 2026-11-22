@@ -17,6 +17,7 @@ def test_env_example_loads_cleanly_with_blank_values() -> None:
     assert settings.solar_latitude is None
     assert settings.bmw_soc_threshold == 20
     assert settings.mini_soc_threshold == 40
+    assert settings.ev_max_charge_kw == 11.0
     assert settings.home_radius_meters == 200.0
     assert settings.max_missed_ev_renotifications == 3
     assert settings.dry_run is False

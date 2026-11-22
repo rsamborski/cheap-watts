@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     bmw_soc_threshold: int = Field(default=20, ge=5, le=95)
     mini_soc_threshold: int = Field(default=40, ge=5, le=95)
     ev_slow_charge_amps: int = Field(default=8, ge=6, le=16)
+    ev_max_charge_kw: float = Field(default=11.0, gt=0.0, le=50.0)
     home_radius_meters: float = Field(default=200.0, gt=0.0, le=10_000.0)
 
     # --- Solar / PV Forecast ---
