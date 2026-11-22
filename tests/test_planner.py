@@ -842,3 +842,197 @@ def test_solar_charging_restricted_to_sunrise_plus_1h_until_sunset_minus_1h() ->
     assert len(plan_b.ev_recommendations) == 1
     assert plan_b.ev_recommendations[0].mode == "solar_slow"
     assert plan_b.ev_recommendations[0].recommended_window == "10:00-14:00"
+
+
+def test_away_from_home_ev_defers_alerts_and_skips_home_deye_blocking() -> None:
+    day_start = datetime(2026, 11, 22, 0, 0, tzinfo=WARSAW)
+    now = datetime(2026, 11, 22, 11, 0, tzinfo=WARSAW)
+
+    # Cheapest 3h = 12:00-15:00, next cheapest = 16:00-19:00
+    hourly_rates = [0.90] * 24
+    for h in (12, 13, 14):
+        hourly_rates[h] = 0.20
+    for h in (16, 17, 18):
+        hourly_rates[h] = 0.30
+    prices = _make_hourly_prices(day_start, hourly_rates)
+    forecast = _make_solar_forecast(day_start, [0.0] * 24)
+    settings = Settings(
+        _env_file=None,
+        battery_capacity_kwh=10.0,
+        battery_min_soc=20,
+        battery_target_soc=95,
+        battery_max_charge_kw=5.0,
+        typical_daily_usage_kwh=12.0,
+    )
+
+    # 1. MINI below threshold but away from home -> no EV rec, Deye uses 12:00-14:00
+    mini_away = VehicleStatus(
+        vehicle_key="mini",
+        display_name="MINI",
+        soc_pct=28,
+        is_at_home=False,
+        distance_from_home_m=8500.0,
+        fetched_at=now,
+    )
+    away_plan = plan_charging_schedule(
+        settings=settings,
+        inverter=_make_inverter(soc=20),
+        price_slots=prices,
+        solar_forecast=forecast,
+        vehicles=[mini_away],
+        now=now,
+    )
+    assert away_plan.ev_recommendations == []
+    assert away_plan.blocked_ev_hours == []
+    assert "away from home (8.5km); deferred EV charging" in away_plan.rationale
+    assert [(s.start_time, s.end_time) for s in away_plan.target_tou_slots if s.grid_charge] == [
+        ("12:00", "14:00")
+    ]
+
+    # 2. Away public fast-charging does NOT block home Deye or suppress at-home BMW alert
+    mini_away_charging = VehicleStatus(
+        vehicle_key="mini",
+        display_name="MINI",
+        soc_pct=45,
+        is_plugged_in=True,
+        is_charging=True,
+        time_remaining_minutes=60,
+        is_at_home=False,
+        distance_from_home_m=15000.0,
+        fetched_at=now,
+    )
+    bmw_home = VehicleStatus(
+        vehicle_key="bmw",
+        display_name="BMW",
+        soc_pct=15,
+        is_at_home=True,
+        distance_from_home_m=20.0,
+        fetched_at=now,
+    )
+    mixed_plan = plan_charging_schedule(
+        settings=settings,
+        inverter=_make_inverter(soc=20),
+        price_slots=prices,
+        solar_forecast=forecast,
+        vehicles=[mini_away_charging, bmw_home],
+        now=now,
+    )
+    assert mixed_plan.ev_actively_charging == []
+    assert len(mixed_plan.ev_recommendations) == 1
+    assert mixed_plan.ev_recommendations[0].vehicle_key == "bmw"
+    assert mixed_plan.ev_recommendations[0].recommended_window == "12:00-15:00"
+    assert [(s.start_time, s.end_time) for s in mixed_plan.target_tou_slots if s.grid_charge] == [
+        ("16:00", "18:00")
+    ]
+
+    # 3. MINI returns home at 15:30 while Deye was locked on 16:00-18:00 -> overrides & alerts
+    t_return = datetime(2026, 11, 22, 15, 30, tzinfo=WARSAW)
+    mini_home = VehicleStatus(
+        vehicle_key="mini",
+        display_name="MINI",
+        soc_pct=28,
+        is_at_home=True,
+        distance_from_home_m=12.0,
+        fetched_at=t_return,
+    )
+    locked_slots = map_windows_to_tou_slots([prices[16:18]], planned_soc=95, min_soc=20, tz=WARSAW)
+    locked_state = AppState(
+        last_run_dry_run=False,
+        last_deye_schedule=[s.to_record() for s in locked_slots],
+        deye_plan_horizon_end=prices[-1].end,
+        deye_plan_solar_sufficient=False,
+    )
+    return_plan = plan_charging_schedule(
+        settings=settings,
+        inverter=_make_inverter(soc=20, tou_slots=locked_slots),
+        price_slots=prices,
+        solar_forecast=forecast,
+        vehicles=[mini_home],
+        now=t_return,
+    )
+    assert len(return_plan.ev_recommendations) == 1
+    assert return_plan.ev_recommendations[0].recommended_window == "16:00-19:00"
+    assert should_replan_deye_schedule(
+        return_plan,
+        _make_inverter(soc=20, tou_slots=locked_slots),
+        prices,
+        locked_state,
+        False,
+        t_return,
+        WARSAW,
+    ) == (True, "ev_conflict_override")
+
+
+def test_postponed_ev_restricts_slots_and_triggers_force_replan() -> None:
+    day_start = datetime(2026, 11, 22, 0, 0, tzinfo=WARSAW)
+    now = datetime(2026, 11, 22, 11, 0, tzinfo=WARSAW)
+
+    # 12:00-15:00 is cheapest, 16:00-19:00 is next cheapest, 19:00-21:00 for Deye
+    hourly_rates = [0.95] * 24
+    for h in (12, 13, 14):
+        hourly_rates[h] = 0.20
+    for h in (16, 17, 18):
+        hourly_rates[h] = 0.30
+    for h in (19, 20):
+        hourly_rates[h] = 0.40
+    prices = _make_hourly_prices(day_start, hourly_rates)
+    forecast = _make_solar_forecast(day_start, [0.0] * 24)
+
+    mini = VehicleStatus(
+        vehicle_key="mini",
+        display_name="MINI",
+        soc_pct=25,
+        is_at_home=False,
+        fetched_at=now,
+    )
+    mini_home = mini.model_copy(update={"is_at_home": True, "distance_from_home_m": 15.0})
+    settings = Settings(_env_file=None, battery_max_charge_kw=5.0)
+
+    postpone_cutoff = datetime(2026, 11, 22, 16, 0, tzinfo=WARSAW)
+    plan = plan_charging_schedule(
+        settings=settings,
+        inverter=_make_inverter(soc=20),
+        price_slots=prices,
+        solar_forecast=forecast,
+        vehicles=[mini_home],
+        now=now,
+        postponed_vehicles={"mini": postpone_cutoff},
+    )
+    assert len(plan.ev_recommendations) == 1
+    assert plan.ev_recommendations[0].recommended_window == "16:00-19:00"
+    assert "postponed >= 16:00" in plan.rationale
+    assert [(s.start_time, s.end_time) for s in plan.target_tou_slots if s.grid_charge] == [
+        ("19:00", "21:00")
+    ]
+
+    # Postponing beyond available tariff horizon defers EV recommendation cleanly
+    far_plan = plan_charging_schedule(
+        settings=settings,
+        inverter=_make_inverter(soc=20),
+        price_slots=prices,
+        solar_forecast=forecast,
+        vehicles=[mini_home],
+        now=now,
+        postponed_vehicles={"mini": now + timedelta(hours=30)},
+    )
+    assert far_plan.ev_recommendations == []
+    assert "no eligible slots in horizon yet" in far_plan.rationale
+
+    # Manual postpone force_replan bypasses sticky daily lock
+    locked_slots = map_windows_to_tou_slots([prices[15:17]], planned_soc=95, min_soc=20, tz=WARSAW)
+    state = AppState(
+        last_run_dry_run=False,
+        last_deye_schedule=[s.to_record() for s in locked_slots],
+        deye_plan_horizon_end=prices[-1].end,
+        deye_plan_solar_sufficient=False,
+    )
+    assert should_replan_deye_schedule(
+        plan,
+        _make_inverter(soc=20, tou_slots=locked_slots),
+        prices,
+        state,
+        False,
+        now,
+        WARSAW,
+        force_replan=True,
+    ) == (True, "manual_postpone_replan")

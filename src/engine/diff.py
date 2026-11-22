@@ -108,6 +108,7 @@ class CycleDecision:
     schedule_diff: ScheduleDiff
     notifiable_ev_recommendations: list[EvChargeRecommendation] = field(default_factory=list)
     suppressed_ev_recommendations: list[EvChargeRecommendation] = field(default_factory=list)
+    missed_followup_counts: dict[str, int] = field(default_factory=dict)
 
 
 def diff_tou_schedules(
@@ -176,20 +177,33 @@ def evaluate_cycle_actions(
     cooldown_hours: float,
     dry_run: bool = False,
     now: datetime | None = None,
+    max_missed_renotifications: int = 3,
 ) -> CycleDecision:
     """Determine Deye write and SMTP notification triggers enforcing dry-run and cooldowns."""
     notifiable: list[EvChargeRecommendation] = []
     suppressed: list[EvChargeRecommendation] = []
+    missed_followup_counts: dict[str, int] = {}
 
     for rec in plan.ev_recommendations:
+        is_missed = StateStore.is_missed_window_renotification(
+            state=state,
+            vehicle_key=rec.vehicle_key,
+            max_missed_renotifications=max_missed_renotifications,
+            now=now,
+        )
         if StateStore.should_notify_vehicle(
             state=state,
             vehicle_key=rec.vehicle_key,
             recommended_window=rec.recommended_window,
             cooldown_hours=cooldown_hours,
+            max_missed_renotifications=max_missed_renotifications,
             now=now,
         ):
             notifiable.append(rec)
+            if is_missed and rec.vehicle_key in state.vehicle_alerts:
+                missed_followup_counts[rec.vehicle_key] = (
+                    state.vehicle_alerts[rec.vehicle_key].missed_window_count + 1
+                )
         else:
             suppressed.append(rec)
 
@@ -205,4 +219,5 @@ def evaluate_cycle_actions(
         schedule_diff=schedule_diff,
         notifiable_ev_recommendations=notifiable,
         suppressed_ev_recommendations=suppressed,
+        missed_followup_counts=missed_followup_counts,
     )

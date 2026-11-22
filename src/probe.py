@@ -359,6 +359,9 @@ def probe_cardata(
         device_code_url=settings.cardata_device_code_url,
         transport=transport,
         token_store=token_store,
+        home_latitude=settings.solar_latitude,
+        home_longitude=settings.solar_longitude,
+        home_radius_meters=settings.home_radius_meters,
     ) as client:
         for vehicle in vehicles:
             if not vehicle.has_credentials(token_store):
@@ -392,6 +395,13 @@ def probe_cardata(
                 extras.append(f"target={st.target_soc_pct}%")
             if st.time_remaining_minutes is not None:
                 extras.append(f"remaining={st.time_remaining_minutes}m")
+            if st.is_at_home is not None and st.distance_from_home_m is not None:
+                dist_label = (
+                    f"{st.distance_from_home_m:.0f}m"
+                    if st.distance_from_home_m < 1000.0
+                    else f"{st.distance_from_home_m / 1000.0:.1f}km"
+                )
+                extras.append(f"at_home={st.is_at_home} ({dist_label})")
             extra_suffix = f" | {' | '.join(extras)}" if extras else ""
             details.append(
                 f"{st.display_name} ({_mask_identifier(st.vin)}): "

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -493,6 +493,14 @@ def _plan_deye_windows(
     return selected, deficit_kwh, planned_soc, hours_needed, proj_soc
 
 
+def _format_distance(distance_m: float | None) -> str:
+    if distance_m is None:
+        return "away"
+    if distance_m < 1000.0:
+        return f"{distance_m:.0f}m"
+    return f"{distance_m / 1000.0:.1f}km"
+
+
 def plan_charging_schedule(
     settings: Settings,
     inverter: InverterStatus,
@@ -500,12 +508,18 @@ def plan_charging_schedule(
     solar_forecast: SolarForecast,
     vehicles: Sequence[VehicleStatus] = (),
     now: datetime | None = None,
+    postponed_vehicles: Mapping[str, datetime] | None = None,
+    active_ev_windows: Mapping[str, tuple[datetime, datetime]] | None = None,
+    paused_vehicles: Collection[str] = (),
 ) -> ChargingPlan:
     """Generate a single-cycle optimization plan for EV alerts and Deye TOU slots."""
     tz = ZoneInfo(settings.timezone)
     current_time = (now or datetime.now(tz=UTC)).astimezone(tz)
     current_hour_start = current_time.replace(minute=0, second=0, microsecond=0)
     horizon_end = current_hour_start + timedelta(hours=24)
+    postponed_map = postponed_vehicles or {}
+    active_windows_map = active_ev_windows or {}
+    paused_set = set(paused_vehicles)
 
     upcoming_slots = sorted(
         (
@@ -539,7 +553,15 @@ def plan_charging_schedule(
         f"threshold={settings.solar_sufficient_kwh_threshold:.1f}kWh)"
     ]
 
-    active_vehicles = [v for v in vehicles if v.is_charging]
+    charging_vehicles = [v for v in vehicles if v.is_charging]
+    active_vehicles = [v for v in charging_vehicles if v.is_at_home is not False]
+    away_charging = [v for v in charging_vehicles if v.is_at_home is False]
+    for away_v in away_charging:
+        rationale_parts.append(
+            f"{away_v.display_name} charging away from home "
+            f"({_format_distance(away_v.distance_from_home_m)}); not blocking home Deye TOU"
+        )
+
     if active_vehicles:
         ev_actively_charging = [v.vehicle_key for v in active_vehicles]
         active_ends = [
@@ -569,33 +591,79 @@ def plan_charging_schedule(
             threshold = _vehicle_threshold(vehicle, settings)
             if vehicle.soc_pct > threshold:
                 continue
-
-            available_for_ev = [s for s in upcoming_slots if s.start not in reserved_starts]
-            if not available_for_ev:
+            if vehicle.is_at_home is False:
+                rationale_parts.append(
+                    f"{vehicle.display_name} ({vehicle.soc_pct}%<={threshold}%) "
+                    f"away from home ({_format_distance(vehicle.distance_from_home_m)}); "
+                    "deferred EV charging"
+                )
+                continue
+            if vehicle.vehicle_key in paused_set:
+                rationale_parts.append(
+                    f"{vehicle.display_name} ({vehicle.soc_pct}%<={threshold}%) "
+                    "paused after max missed windows; deferred EV charging"
+                )
                 continue
 
+            raw_cutoff = postponed_map.get(vehicle.vehicle_key)
+            cutoff_local = (
+                raw_cutoff.astimezone(tz)
+                if raw_cutoff is not None and raw_cutoff.astimezone(tz) > current_time
+                else None
+            )
+            available_for_ev = [
+                s
+                for s in upcoming_slots
+                if s.start not in reserved_starts
+                and (cutoff_local is None or s.start >= cutoff_local)
+            ]
+            if not available_for_ev:
+                if cutoff_local is not None:
+                    rationale_parts.append(
+                        f"{vehicle.display_name} postponed until "
+                        f"{cutoff_local.strftime('%Y-%m-%d %H:%M')}; "
+                        "no eligible slots in horizon yet"
+                    )
+                continue
+
+            active_bounds = (
+                active_windows_map.get(vehicle.vehicle_key) if cutoff_local is None else None
+            )
+            chosen: list[PriceSlot] = []
             mode: Literal["solar_slow", "grid_cheap"]
             amps: int | None
-            if solar_sufficient:
-                chosen = _select_solar_ev_window(available_for_ev, solar_forecast)
-                mode = "solar_slow"
-                amps = settings.ev_slow_charge_amps
-            else:
-                # Reserve post-EV room on the last/only EV recommendation if battery needs grid
-                remaining_evs = sum(
-                    1
-                    for later in vehicles[idx + 1 :]
-                    if later.soc_pct <= _vehicle_threshold(later, settings)
-                )
-                extra_room = prelim_deye_hours + (remaining_evs * _DEFAULT_EV_GRID_HOURS)
-                chosen = _select_cheap_ev_window(available_for_ev, deye_hours_needed=extra_room)
-                mode = "grid_cheap"
-                amps = None
+            win_str: str
+            if active_bounds is not None:
+                w_start = active_bounds[0].astimezone(tz)
+                w_end = active_bounds[1].astimezone(tz)
+                chosen = [s for s in available_for_ev if s.start < w_end and s.end > w_start]
+                if chosen:
+                    mode = "solar_slow" if solar_sufficient else "grid_cheap"
+                    amps = settings.ev_slow_charge_amps if solar_sufficient else None
+                    win_str = f"{w_start.strftime('%H:%M')}-{w_end.strftime('%H:%M')}"
 
             if not chosen:
-                continue
+                if solar_sufficient:
+                    chosen = _select_solar_ev_window(available_for_ev, solar_forecast)
+                    mode = "solar_slow"
+                    amps = settings.ev_slow_charge_amps
+                else:
+                    # Reserve post-EV room on the last/only EV recommendation if battery needs grid
+                    remaining_evs = sum(
+                        1
+                        for later in vehicles[idx + 1 :]
+                        if later.soc_pct <= _vehicle_threshold(later, settings)
+                        and later.is_at_home is not False
+                        and later.vehicle_key not in paused_set
+                    )
+                    extra_room = prelim_deye_hours + (remaining_evs * _DEFAULT_EV_GRID_HOURS)
+                    chosen = _select_cheap_ev_window(available_for_ev, deye_hours_needed=extra_room)
+                    mode = "grid_cheap"
+                    amps = None
 
-            win_str = _format_window(chosen, tz)
+                if not chosen:
+                    continue
+                win_str = _format_window(chosen, tz)
             ev_recommendations.append(
                 EvChargeRecommendation(
                     vehicle_key=vehicle.vehicle_key,
@@ -611,9 +679,14 @@ def plan_charging_schedule(
             for s in chosen:
                 reserved_starts.add(s.start)
                 reserved_slots_all.append(s)
+            postpone_note = (
+                f" (postponed >= {cutoff_local.strftime('%H:%M')})"
+                if cutoff_local is not None
+                else ""
+            )
             rationale_parts.append(
                 f"Recommend {vehicle.display_name} ({vehicle.soc_pct}%<={threshold}%) "
-                f"{mode} {win_str}"
+                f"{mode} {win_str}{postpone_note}"
             )
 
         if reserved_slots_all:
@@ -804,6 +877,7 @@ def should_replan_deye_schedule(
     effective_dry_run: bool,
     now: datetime,
     tz: ZoneInfo,
+    force_replan: bool = False,
 ) -> tuple[bool, str]:
     """Decide whether Deye TOU slots may be updated or remain locked for the current horizon."""
     local_now = now.astimezone(tz)
@@ -819,6 +893,9 @@ def should_replan_deye_schedule(
 
     if locked_slots is None:
         return True, "initial_plan"
+
+    if force_replan:
+        return True, "manual_postpone_replan"
 
     if state.last_run_dry_run is True and not effective_dry_run:
         return True, "dry_run_to_live_transition"

@@ -18,6 +18,7 @@ from src.clients.cardata import (
     CarDataTokenStore,
     CarDataVehicleConfig,
     generate_pkce_pair,
+    haversine_distance_m,
 )
 from src.clients.errors import (
     ApiClientError,
@@ -235,7 +236,11 @@ def test_container_provisioning_reuse_fallback_and_brand_vin_discovery() -> None
                 200,
                 json=[
                     {"containerId": "OTHER1", "name": "other", "state": "ACTIVE"},
-                    {"containerId": "CONT0000EXAMPLE1", "name": "cheap-watts", "state": "ACTIVE"},
+                    {
+                        "containerId": "CONT0000EXAMPLE1",
+                        "name": "cheap-watts-v2",
+                        "state": "ACTIVE",
+                    },
                 ],
             )
         )
@@ -321,7 +326,7 @@ def test_token_store_rotation_persistence_and_auto_container_recovery(tmp_path: 
                     "containers": [
                         {
                             "containerId": "CONT0000EXAMPLE9",
-                            "name": "cheap-watts",
+                            "name": "cheap-watts-v2",
                             "state": "ACTIVE",
                         }
                     ]
@@ -545,3 +550,125 @@ def test_cardata_additional_validation_and_discovery_errors() -> None:
             pytest.raises(PayloadParseError),
         ):
             client.fetch_vehicle_status(cfg_vin)
+
+
+def test_cardata_gps_geofence_v1_container_upgrade_and_privacy(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # 1. Haversine distance sanity check (~45m vs >5km)
+    home_lat, home_lon = 52.2300, 21.0100
+    assert haversine_distance_m(home_lat, home_lon, 52.2303, 21.0104) < 60.0
+    assert haversine_distance_m(home_lat, home_lon, 52.2800, 21.0800) > 5000.0
+
+    # 2. Legacy tokens file without `container_version` triggers auto-upgrade to cheap-watts-v2
+    tokens_path = tmp_path / "data" / "cardata_tokens.json"
+    tokens_path.parent.mkdir(parents=True, exist_ok=True)
+    future_iso = (datetime.now(tz=UTC) + timedelta(hours=2)).isoformat()
+    tokens_path.write_text(
+        json.dumps(
+            {
+                "vehicles": {
+                    "mini": {
+                        "access_token": "test-api-key",
+                        "refresh_token": "test-api-key-refresh",
+                        "expires_at": future_iso,
+                        "client_id": "example-mini-client",
+                        "vin": "WMW0000000EXAMPLE2",
+                        "container_id": "CONT_OLD_V1",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = CarDataTokenStore(tokens_path)
+    loaded = store.get("mini")
+    assert loaded is not None
+    assert loaded.container_version == 1
+
+    created_descriptors: list[list[str]] = []
+    seen_cids: list[str] = []
+    coords_queue = iter(
+        [
+            (52.2302, 21.0102),  # ~26m -> at home
+            (52.2900, 21.1000),  # ~9km -> away from home
+            (0.0, 0.0),  # null/zeroed GPS -> unknown (None)
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/customers/containers":
+            return httpx.Response(
+                200,
+                json={
+                    "containers": [
+                        {"containerId": "CONT_OLD_V1", "name": "cheap-watts", "state": "ACTIVE"}
+                    ]
+                },
+            )
+        if request.method == "POST" and request.url.path == "/customers/containers":
+            body = json.loads(request.content.decode("utf-8"))
+            assert body["name"] == "cheap-watts-v2"
+            created_descriptors.append(list(body["technicalDescriptors"]))
+            return httpx.Response(201, json={"containerId": "CONT_NEW_V2"})
+        if request.url.path == "/customers/vehicles/WMW0000000EXAMPLE2/telematicData":
+            seen_cids.append(request.url.params.get("containerId", ""))
+            lat, lon = next(coords_queue)
+            return httpx.Response(
+                200,
+                json={
+                    "telematicData": {
+                        "vehicle.drivetrain.batteryManagement.header": {"value": 30},
+                        "vehicle.cabin.infotainment.navigation.currentLocation.latitude": {
+                            "value": str(lat)
+                        },
+                        "vehicle.cabin.infotainment.navigation.currentLocation.longitude": {
+                            "value": str(lon)
+                        },
+                    }
+                },
+            )
+        raise AssertionError(f"Unexpected URL: {request.method} {request.url}")
+
+    cfg = CarDataVehicleConfig(
+        vehicle_key="mini",
+        display_name="MINI",
+        client_id="example-mini-client",
+    )
+    caplog.set_level("INFO", logger="cheap_watts.clients.cardata")
+    with CarDataClient(
+        transport=httpx.MockTransport(handler),
+        token_store=store,
+        home_latitude=home_lat,
+        home_longitude=home_lon,
+        home_radius_meters=200.0,
+    ) as client:
+        at_home = client.fetch_vehicle_status(cfg)
+        away = client.fetch_vehicle_status(cfg)
+        unknown = client.fetch_vehicle_status(cfg)
+
+    assert len(created_descriptors) == 1
+    assert (
+        "vehicle.cabin.infotainment.navigation.currentLocation.latitude" in created_descriptors[0]
+    )
+    assert (
+        "vehicle.cabin.infotainment.navigation.currentLocation.longitude" in created_descriptors[0]
+    )
+    assert seen_cids == ["CONT_NEW_V2", "CONT_NEW_V2", "CONT_NEW_V2"]
+    upgraded = store.get("mini")
+    assert upgraded is not None and upgraded.container_id == "CONT_NEW_V2"
+    assert upgraded.container_version == 2
+
+    assert at_home.is_at_home is True
+    assert at_home.distance_from_home_m is not None and at_home.distance_from_home_m < 50.0
+    assert away.is_at_home is False
+    assert away.distance_from_home_m is not None and away.distance_from_home_m > 5000.0
+    assert unknown.is_at_home is None
+    assert unknown.distance_from_home_m is None
+
+    # Privacy: raw GPS coordinates must never appear in logs
+    logged_text = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
+    assert "52.2302" not in logged_text
+    assert "52.29" not in logged_text
+    assert "21.1" not in logged_text

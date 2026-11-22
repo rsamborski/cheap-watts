@@ -112,6 +112,48 @@ def test_run_probes_all_services_succeed_with_fixtures(tmp_path: Path) -> None:
     assert "test-api-key" not in report
 
 
+def test_probe_cardata_displays_at_home_distance_without_raw_coords(tmp_path: Path) -> None:
+    tokens_file = tmp_path / "cardata_tokens.json"
+    CarDataTokenStore(tokens_file).upsert(
+        "mini",
+        CarDataTokenRecord(
+            access_token=SecretStr("test-api-key"),
+            refresh_token=SecretStr("test-api-key"),
+            expires_at=datetime.now(tz=UTC) + timedelta(hours=1),
+            client_id="example-mini-client",
+            vin="WMW0000000EXAMPLE2",
+            container_id="CONT0000EXAMPLE2",
+        ),
+    )
+    settings = Settings(
+        _env_file=None,
+        solar_latitude=52.2300,
+        solar_longitude=21.0100,
+        home_radius_meters=200.0,
+        mini_cardata_client_id="example-mini-client",
+        cardata_tokens_file=tokens_file,
+    )
+    payload = {
+        "telematicData": {
+            "vehicle.drivetrain.batteryManagement.header": {"value": 32},
+            "vehicle.cabin.infotainment.navigation.currentLocation.latitude": {"value": "52.29"},
+            "vehicle.cabin.infotainment.navigation.currentLocation.longitude": {"value": "21.10"},
+        }
+    }
+    results = run_probes(
+        settings,
+        target="cardata",
+        transports={"cardata": httpx.MockTransport(lambda _r: httpx.Response(200, json=payload))},
+    )
+    assert len(results) == 1
+    assert results[0].status == "ok"
+    mini_line = next(d for d in results[0].details if d.startswith("MINI"))
+    assert "at_home=False" in mini_line
+    assert "km)" in mini_line
+    assert "52.29" not in mini_line
+    assert "21.10" not in mini_line
+
+
 def test_run_probes_handles_failures_and_partial_data(tmp_path: Path) -> None:
     today_only_bytes = (FIXTURES / "pstryk_today_only.json").read_bytes()
     mini_bytes = (FIXTURES / "cardata_mini_telematic.json").read_bytes()
