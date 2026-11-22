@@ -93,6 +93,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="all",
         help="Probe a single service or all services (default: all).",
     )
+    probe_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        default=False,
+        help="Show detailed probe output (e.g. all hourly price slots for pstryk).",
+    )
 
     auth_parser = subparsers.add_parser(
         "cardata-auth",
@@ -668,14 +675,18 @@ def execute_postpone(
     )
 
 
-def execute_probe(settings: Settings, target: ProbeTarget = "all") -> int:
+def execute_probe(
+    settings: Settings,
+    target: ProbeTarget = "all",
+    verbose: bool = False,
+) -> int:
     """Execute read-only API connectivity and parsing probes."""
     setup_logging(
         settings.log_dir,
         level=settings.log_level,
         tz_name=settings.timezone,
     )
-    results = run_probes(settings, target=target)
+    results = run_probes(settings, target=target, verbose=verbose)
     print(format_probe_report(results, timezone=settings.timezone))
     has_failures = any(res.status == "failed" for res in results)
     return 1 if has_failures else 0
@@ -826,7 +837,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "status":
         return execute_status(settings)
     if args.command == "probe":
-        return execute_probe(settings, target=args.service)
+        return execute_probe(settings, target=args.service, verbose=args.verbose)
     if args.command == "cardata-auth":
         return execute_cardata_auth(settings, vehicle_target=args.vehicle)
     if args.command == "postpone":

@@ -23,7 +23,7 @@ A headless Home Energy Management System (HEMS) written in Python 3.12+ (`uv`), 
    - **CarData GPS Home Geofence:** Automatically checks vehicle GPS distance against `(SOLAR_LATITUDE, SOLAR_LONGITUDE)` within `HOME_RADIUS_METERS` (`200m` default). Away vehicles (`is_at_home=False`) defer EV charging alerts and never block home Deye TOU slots; planning triggers as soon as the vehicle arrives home.
    - **Active EV Session Detection:** If BMW CarData reports an EV at home is actively charging, skips redundant EV alerts and blocks those hours from Deye grid-charging.
    - **Manual Postponement & Missed-Window Re-Alerts:** Use `cheap-watts postpone -v mini --until 16:00` to defer EV charging and immediately unblock Deye TOU slots; if a recommended window at home is missed without charging, follow-up alerts re-plan the next best window up to `MAX_MISSED_EV_RENOTIFICATIONS` (`3` default).
-   - **Post-EV Battery Ordering:** Whenever an EV at home is actively charging or recommended a charging window (`BMW <= 20%`, `MINI <= 40%`), Deye home battery grid-charging is scheduled **strictly after** the EV window so EV charging never drains freshly grid-charged battery capacity.
+   - **Post-EV Battery Ordering & Joint Cost Optimization:** Whenever an EV at home is actively charging or recommended a charging window (`BMW <= 20%`, `MINI <= 40%`), Deye home battery grid-charging is scheduled **strictly after** the EV window so EV charging never drains freshly grid-charged battery capacity. In low-sun mode, candidate EV windows are evaluated jointly with the resulting post-EV Deye charging cost (`EV_MAX_CHARGE_KW` + battery deficit) to avoid forcing Deye into expensive tariff peaks.
    - **Sun Slow-Charge vs. Cheap Grid:** Recommends daytime slow-charge (`EV_SLOW_CHARGE_AMPS`, e.g. `8A`) on sunny days and cheapest contiguous Pstryk hours on cloudy days.
 3. **Local LAN Inverter Control (Zero Cloud Rate Limits):**
    - Talks directly to the Deye / **SOLARMAN Smart** Wi-Fi stick logger over local TCP (`:8899` via `pysolarmanv5`), preserving weekday/generator bitmasks on TOU registers (`146, 148..153, 166..177`), with Deye Cloud Open API kept as an optional fallback.
@@ -113,6 +113,7 @@ SMTP_TO_EMAIL=driver1@example.com, driver2@example.com
 ```bash
 # Verify read-only connectivity across all configured integrations (or a single service):
 uv run cheap-watts probe
+uv run cheap-watts probe -s pstryk -v
 uv run cheap-watts probe -s deye
 
 # Check configuration readiness and last persisted state:
@@ -145,6 +146,7 @@ uv run cheap-watts postpone -v mini --clear
 | `SOLAR_SUFFICIENT_KWH_THRESHOLD` | `12.0` | 24h PV kWh threshold at/above which Deye grid-charging is disabled. |
 | `BMW_SOC_THRESHOLD` / `MINI_SOC_THRESHOLD` | `20` / `40` | EV SoC (%) thresholds triggering charging recommendations. |
 | `EV_SLOW_CHARGE_AMPS` | `8` | Recommended slow-charge current (`6–16A`) during sunny PV windows. |
+| `EV_MAX_CHARGE_KW` | `11.0` | Expected EV grid charge power (kW) used when jointly minimizing EV + post-EV Deye costs. |
 | `HOME_RADIUS_METERS` | `200` | Max distance (m) from home coordinates to treat an EV as parked at home. |
 | `ALERT_COOLDOWN_HOURS` | `12` | Minimum hours before repeating an unchanged EV/error alert. |
 | `MAX_MISSED_EV_RENOTIFICATIONS` | `3` | Max missed-window EV re-notifications per low-SoC episode before cooldown applies. |

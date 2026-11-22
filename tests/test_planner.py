@@ -23,7 +23,7 @@ from src.models import (
     TouSlot,
     VehicleStatus,
 )
-from src.state import AppState
+from src.state import AppState, VehicleAlertRecord
 
 WARSAW = ZoneInfo("Europe/Warsaw")
 
@@ -1036,3 +1036,133 @@ def test_postponed_ev_restricts_slots_and_triggers_force_replan() -> None:
         WARSAW,
         force_replan=True,
     ) == (True, "manual_postpone_replan")
+
+
+def test_joint_ev_and_deye_optimization_avoids_morning_tariff_cliff() -> None:
+    """Live 2026-11-22/23 tariffs: EV moves to 00-03 so Deye charges 03-06 before 06:00 cliff."""
+    base = datetime(2026, 11, 22, 0, 0, tzinfo=WARSAW)
+    now = datetime(2026, 11, 22, 16, 45, tzinfo=WARSAW)
+
+    rates_48h = [
+        # 2026-11-22 00:00..23:00
+        0.6587,
+        0.7814,
+        0.7825,
+        0.7918,
+        0.8108,
+        0.6878,
+        0.6890,
+        0.6586,
+        0.6586,
+        0.6965,
+        0.7062,
+        0.6633,
+        0.6615,
+        0.8025,
+        1.0808,
+        1.2967,
+        1.3908,
+        1.5230,
+        1.4707,
+        1.4754,
+        1.3913,
+        1.3370,
+        1.2750,
+        1.0643,
+        # 2026-11-23 00:00..23:00
+        0.9552,
+        0.9749,
+        0.9235,
+        0.8800,
+        0.8835,
+        0.8690,
+        1.5746,
+        2.0418,
+        2.1060,
+        2.0752,
+        1.9020,
+        1.9184,
+        1.8708,
+        1.5793,
+        1.6556,
+        2.1073,
+        2.0677,
+        1.9321,
+        1.8352,
+        1.7722,
+        1.5967,
+        1.2799,
+        0.8751,
+        0.7963,
+    ]
+    prices = _make_hourly_prices(base, rates_48h)
+    pv = [0.0] * 48
+    pv[34] = 1.0  # ~2 kWh tomorrow midday
+    pv[35] = 1.0
+    forecast = _make_solar_forecast(base, pv)
+
+    mini_home = VehicleStatus(
+        vehicle_key="mini",
+        display_name="MINI",
+        soc_pct=30,
+        is_at_home=True,
+        distance_from_home_m=15.0,
+        fetched_at=now,
+    )
+    settings = Settings(
+        _env_file=None,
+        battery_capacity_kwh=15.0,
+        battery_min_soc=15,
+        battery_target_soc=95,
+        battery_max_charge_kw=5.0,
+        typical_daily_usage_kwh=15.0,
+        usage_buffer_pct=10.0,
+        solar_sufficient_kwh_threshold=12.0,
+        ev_max_charge_kw=11.0,
+    )
+
+    plan = plan_charging_schedule(
+        settings=settings,
+        inverter=_make_inverter(soc=25),
+        price_slots=prices,
+        solar_forecast=forecast,
+        vehicles=[mini_home],
+        now=now,
+    )
+
+    assert len(plan.ev_recommendations) == 1
+    assert plan.ev_recommendations[0].recommended_window == "00:00-03:00"
+    active_tou = [(s.start_time, s.end_time) for s in plan.target_tou_slots if s.grid_charge]
+    assert active_tou == [("03:00", "06:00")]
+
+    # Re-evaluating against an older sticky plan with EV previously at 03:00-06:00 must replan Deye
+    old_deye = map_windows_to_tou_slots(
+        windows=[prices[30:31], prices[37:39]],  # 06:00-07:00 & 13:00-15:00
+        planned_soc=95,
+        min_soc=15,
+        tz=WARSAW,
+    )
+    prior_state = AppState(
+        last_run_dry_run=False,
+        last_deye_schedule=[s.to_record() for s in old_deye],
+        deye_plan_horizon_end=prices[-1].end,
+        deye_plan_solar_sufficient=False,
+        vehicle_alerts={
+            "mini": VehicleAlertRecord(
+                last_notified_at=now - timedelta(hours=1),
+                last_notified_soc=30,
+                recommended_window="03:00-06:00",
+                window_start=prices[27].start,
+                window_end=prices[30].end,
+            )
+        },
+    )
+    assert should_replan_deye_schedule(
+        plan,
+        _make_inverter(soc=25, tou_slots=old_deye),
+        prices,
+        prior_state,
+        False,
+        now,
+        WARSAW,
+    ) == (True, "ev_window_changed")
