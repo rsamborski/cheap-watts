@@ -28,6 +28,7 @@ from src.clients.errors import (
     RateLimitError,
     parse_json_response,
 )
+from src.clients.retry import RetryPolicy, request_with_retry
 from src.models import VehicleStatus
 
 logger = logging.getLogger("cheap_watts.clients.cardata")
@@ -342,6 +343,7 @@ class CarDataClient:
         home_latitude: float | None = None,
         home_longitude: float | None = None,
         home_radius_meters: float = 200.0,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._token_url = token_url
@@ -351,6 +353,7 @@ class CarDataClient:
         self._home_longitude = home_longitude
         self._home_radius_meters = home_radius_meters
         self._token_cache: dict[str, str] = {}
+        self._retry_policy = retry_policy or RetryPolicy()
         self._client = httpx.Client(
             timeout=timeout,
             transport=transport,
@@ -378,8 +381,12 @@ class CarDataClient:
         """Initiate OAuth 2.0 Device Code + PKCE flow for BMW / MINI CarData."""
         verifier, challenge = generate_pkce_pair()
         try:
-            response = self._client.post(
+            response = request_with_retry(
+                self._client,
+                "POST",
                 self._device_code_url,
+                service="BMW CarData OAuth",
+                policy=self._retry_policy,
                 data={
                     "client_id": client_id,
                     "response_type": "device_code",
@@ -442,8 +449,12 @@ class CarDataClient:
         while (monotonic_fn() - started) < challenge.expires_in:
             sleep_fn(interval)
             try:
-                response = self._client.post(
+                response = request_with_retry(
+                    self._client,
+                    "POST",
                     self._token_url,
+                    service="BMW CarData OAuth",
+                    policy=self._retry_policy,
                     data={
                         "client_id": client_id,
                         "device_code": challenge.device_code,
@@ -493,7 +504,14 @@ class CarDataClient:
             "x-version": "v1",
         }
         try:
-            list_resp = self._client.get(list_url, headers=headers)
+            list_resp = request_with_retry(
+                self._client,
+                "GET",
+                list_url,
+                service="BMW CarData",
+                policy=self._retry_policy,
+                headers=headers,
+            )
         except httpx.HTTPError as exc:
             raise ApiClientError(
                 f"BMW CarData container lookup network error: {exc.__class__.__name__}"
@@ -531,7 +549,15 @@ class CarDataClient:
             "technicalDescriptors": list(descriptors),
         }
         try:
-            response = self._client.post(url, headers=headers, json=body)
+            response = request_with_retry(
+                self._client,
+                "POST",
+                url,
+                service="BMW CarData",
+                policy=self._retry_policy,
+                headers=headers,
+                json=body,
+            )
         except httpx.HTTPError as exc:
             raise ApiClientError(
                 f"BMW CarData container creation network error: {exc.__class__.__name__}"
@@ -558,8 +584,12 @@ class CarDataClient:
         """Discover the mapped VIN, preferring brand-matching WMI prefixes when present."""
         url = f"{self._base_url}{_MAPPINGS_PATH}"
         try:
-            response = self._client.get(
+            response = request_with_retry(
+                self._client,
+                "GET",
                 url,
+                service="BMW CarData",
+                policy=self._retry_policy,
                 headers={
                     "Authorization": f"Bearer {token}",
                     "x-version": "v1",
@@ -774,8 +804,12 @@ class CarDataClient:
         url = f"{self._base_url}{_TELEMATIC_PATH_TEMPLATE.format(vin=vin)}"
         params = {"containerId": container_id} if container_id else None
         try:
-            return self._client.get(
+            return request_with_retry(
+                self._client,
+                "GET",
                 url,
+                service=f"BMW CarData ({vehicle_key})",
+                policy=self._retry_policy,
                 params=params,
                 headers={
                     "Authorization": f"Bearer {token}",
@@ -847,8 +881,12 @@ class CarDataClient:
             )
 
         try:
-            response = self._client.post(
+            response = request_with_retry(
+                self._client,
+                "POST",
                 self._token_url,
+                service=f"BMW CarData OAuth ({config.display_name})",
+                policy=self._retry_policy,
                 data={
                     "grant_type": "refresh_token",
                     "client_id": config.client_id,

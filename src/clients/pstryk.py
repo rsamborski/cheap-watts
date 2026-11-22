@@ -13,6 +13,7 @@ import httpx
 from pydantic import SecretStr
 
 from src.clients.errors import ApiClientError, PayloadParseError, parse_json_response
+from src.clients.retry import RetryPolicy, request_with_retry
 from src.models import PriceSlot
 
 logger = logging.getLogger("cheap_watts.clients.pstryk")
@@ -76,10 +77,12 @@ class PstrykClient:
         tz_name: str = "Europe/Warsaw",
         timeout: float = 15.0,
         transport: httpx.BaseTransport | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._api_key = api_key
         self._auth_token = _normalize_api_token(api_key)
         self._tz = ZoneInfo(tz_name)
+        self._retry_policy = retry_policy or RetryPolicy()
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             timeout=timeout,
@@ -113,8 +116,12 @@ class PstrykClient:
         end_utc = window_end.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         try:
-            response = self._client.get(
+            response = request_with_retry(
+                self._client,
+                "GET",
                 _UNIFIED_METRICS_PATH,
+                service="Pstryk",
+                policy=self._retry_policy,
                 params={
                     "metrics": "pricing",
                     "resolution": "hour",

@@ -26,6 +26,7 @@ from src.clients.cardata import (
 from src.clients.deye import DeyeCloudClient, SolarmanV5Client
 from src.clients.errors import ApiClientError
 from src.clients.pstryk import PstrykClient
+from src.clients.retry import RetryPolicy
 from src.clients.solar import SolarArray, SolarForecastClient
 from src.config import Settings, load_settings
 from src.engine.diff import diff_tou_schedules, evaluate_cycle_actions
@@ -231,6 +232,7 @@ def _poll_vehicles_gracefully(
     settings: Settings,
     logger: logging.Logger,
     transport: httpx.BaseTransport | None = None,
+    retry_policy: RetryPolicy | None = None,
 ) -> list[VehicleStatus]:
     token_store = CarDataTokenStore(settings.cardata_tokens_file)
     vehicles = [v for v in build_cardata_vehicles(settings) if v.has_credentials(token_store)]
@@ -247,6 +249,7 @@ def _poll_vehicles_gracefully(
         home_latitude=settings.solar_latitude,
         home_longitude=settings.solar_longitude,
         home_radius_meters=settings.home_radius_meters,
+        retry_policy=retry_policy,
     ) as client:
         for veh in vehicles:
             try:
@@ -331,12 +334,14 @@ def execute_run(
         assert settings.solar_latitude is not None
         assert settings.solar_longitude is not None
         assert settings.solar_kwp is not None
+        retry_policy = RetryPolicy.from_settings(settings)
 
         with PstrykClient(
             api_key=settings.pstryk_api_key,
             base_url=settings.pstryk_base_url,
             tz_name=settings.timezone,
             transport=transport_map.get("pstryk"),
+            retry_policy=retry_policy,
         ) as pstryk_client:
             price_slots = pstryk_client.fetch_today_and_tomorrow(reference_time=current_time)
 
@@ -351,6 +356,7 @@ def execute_run(
             tz_name=settings.timezone,
             transport=transport_map.get("solar"),
             extra_arrays=_build_extra_solar_arrays(settings),
+            retry_policy=retry_policy,
         ) as solar_client:
             solar_forecast = solar_client.fetch_forecast(forecast_days=2)
 
@@ -358,6 +364,7 @@ def execute_run(
             settings=settings,
             logger=logger,
             transport=transport_map.get("cardata"),
+            retry_policy=retry_policy,
         )
 
         # Reconcile polled EV telemetry and expired postponements against alert state
@@ -748,6 +755,7 @@ def execute_cardata_auth(
             device_code_url=settings.cardata_device_code_url,
             transport=transport,
             token_store=token_store,
+            retry_policy=RetryPolicy.from_settings(settings),
         ) as client:
             for client_id, group_vehicles in grouped.items():
                 label = ", ".join(v.display_name for v in group_vehicles)
