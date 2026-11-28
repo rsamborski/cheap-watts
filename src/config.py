@@ -88,6 +88,8 @@ class Settings(BaseSettings):
     cardata_tokens_file: Path = Path("data/cardata_tokens.json")
     alert_cooldown_hours: float = Field(default=12.0, ge=0.0)
     max_missed_ev_renotifications: int = Field(default=3, ge=0, le=20)
+    api_max_retries: int = Field(default=3, ge=0, le=10)
+    api_retry_backoff_seconds: float = Field(default=2.0, ge=0.0, le=60.0)
 
     @field_validator(
         "pstryk_api_key",

@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 
 from src.clients.errors import ApiClientError, PayloadParseError, parse_json_response
+from src.clients.retry import RetryPolicy, request_with_retry
 from src.models import DaylightWindow, SolarForecast, SolarHour
 
 logger = logging.getLogger("cheap_watts.clients.solar")
@@ -77,6 +78,7 @@ class SolarForecastClient:
         timeout: float = 15.0,
         transport: httpx.BaseTransport | None = None,
         extra_arrays: Sequence[SolarArray] = (),
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         if not -90.0 <= latitude <= 90.0:
             raise ValueError("latitude must be between -90 and 90")
@@ -96,6 +98,7 @@ class SolarForecastClient:
         self._kwp = sum(arr.kwp for arr in self._arrays)
         self._efficiency = system_efficiency
         self._tz = ZoneInfo(tz_name)
+        self._retry_policy = retry_policy or RetryPolicy()
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             timeout=timeout,
@@ -173,7 +176,14 @@ class SolarForecastClient:
             params["daily"] = "sunrise,sunset"
 
         try:
-            response = self._client.get(_FORECAST_PATH, params=params)
+            response = request_with_retry(
+                self._client,
+                "GET",
+                _FORECAST_PATH,
+                service="Open-Meteo",
+                policy=self._retry_policy,
+                params=params,
+            )
         except httpx.HTTPError as exc:
             raise ApiClientError(
                 f"Open-Meteo solar forecast network error: {exc.__class__.__name__}"

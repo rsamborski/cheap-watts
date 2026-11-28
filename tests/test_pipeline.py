@@ -738,3 +738,135 @@ def test_pipeline_away_deferral_then_home_arrival_and_bounded_missed_renotificat
     assert "EV Charging Recommendations" in sent_emails[-1].get_content()
     assert "[missed previous window" not in sent_emails[-1].get_content()
     assert StateStore(settings.state_file).load().vehicle_alerts["mini"].missed_window_count == 3
+
+
+def test_execute_run_retries_transient_api_failures_before_failing_or_recovering(
+    tmp_path: Path,
+) -> None:
+    pstryk_bytes = (FIXTURES / "pstryk_unified_metrics.json").read_bytes()
+    solar_bytes = (FIXTURES / "open_meteo_forecast.json").read_bytes()
+
+    telemetry = [0] * 86
+    telemetry[0] = 60
+    tou_regs = [0] * 32
+    tou_regs[0] = 0xFF
+    for idx, hhmm in enumerate((0, 400, 800, 1200, 1600, 2000)):
+        tou_regs[2 + idx] = hhmm
+        tou_regs[20 + idx] = 20
+
+    class FakeModbus:
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            pass
+
+        def read_holding_registers(self, register_addr: int, quantity: int) -> list[int]:
+            return list(telemetry) if register_addr == 588 else list(tou_regs)
+
+        def write_multiple_holding_registers(self, *_a: object, **_kw: object) -> None:
+            pass
+
+        def disconnect(self) -> None:
+            pass
+
+    sent_emails: list[EmailMessage] = []
+
+    class FakeSmtp:
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeSmtp:
+            return self
+
+        def __exit__(self, *_a: object) -> None:
+            pass
+
+        def ehlo(self) -> None:
+            pass
+
+        def starttls(self, **_kw: object) -> None:
+            pass
+
+        def login(self, *_a: object) -> None:
+            pass
+
+        def send_message(self, msg: EmailMessage) -> None:
+            sent_emails.append(msg)
+
+    pstryk_calls = 0
+    solar_calls = 0
+
+    def flaky_pstryk(request: httpx.Request) -> httpx.Response:
+        nonlocal pstryk_calls
+        pstryk_calls += 1
+        if pstryk_calls <= 3:
+            raise httpx.ReadTimeout("temporary read timeout", request=request)
+        return httpx.Response(200, content=pstryk_bytes)
+
+    def flaky_solar(_request: httpx.Request) -> httpx.Response:
+        nonlocal solar_calls
+        solar_calls += 1
+        if solar_calls <= 3:
+            return httpx.Response(503, text="upstream busy")
+        return httpx.Response(200, content=solar_bytes)
+
+    settings = Settings(
+        _env_file=None,
+        log_dir=tmp_path / "logs",
+        state_file=tmp_path / "data" / "state.json",
+        pstryk_api_key=SecretStr("test-api-key"),
+        solar_latitude=52.23,
+        solar_longitude=21.01,
+        solar_kwp=5.0,
+        deye_modbus_host="192.168.1.50",
+        deye_logger_serial="2700012345",
+        smtp_host="smtp.example.com",
+        smtp_from_email="alerts@example.com",
+        smtp_to_email="owner@example.com",
+        api_max_retries=3,
+        api_retry_backoff_seconds=2.0,
+    )
+
+    ref_now = datetime(2026, 11, 15, 0, 5, tzinfo=UTC)
+
+    # 1. Both Pstryk ReadTimeout (3x) and Open-Meteo 503 (3x) recover on 4th attempt -> no alert
+    rc_ok = execute_run(
+        settings,
+        force_dry_run=True,
+        transports={
+            "pstryk": httpx.MockTransport(flaky_pstryk),
+            "solar": httpx.MockTransport(flaky_solar),
+        },
+        modbus_factory=FakeModbus,
+        smtp_factory=FakeSmtp,
+        now=ref_now,
+    )
+    _clear_app_loggers()
+    assert rc_ok == 0
+    assert pstryk_calls == 4
+    assert solar_calls == 4
+    assert not any("Optimization cycle failed" in str(m["Subject"]) for m in sent_emails)
+
+    # 2. Persistent Open-Meteo 503 exhausts 4 attempts (1 + 3 retries) before sending failure alert
+    persistent_solar_calls = 0
+
+    def always_503_solar(_request: httpx.Request) -> httpx.Response:
+        nonlocal persistent_solar_calls
+        persistent_solar_calls += 1
+        return httpx.Response(503, text="still down")
+
+    rc_fail = execute_run(
+        settings,
+        force_dry_run=True,
+        transports={
+            "pstryk": httpx.MockTransport(lambda _r: httpx.Response(200, content=pstryk_bytes)),
+            "solar": httpx.MockTransport(always_503_solar),
+        },
+        modbus_factory=FakeModbus,
+        smtp_factory=FakeSmtp,
+        now=ref_now + timedelta(minutes=30),
+    )
+    _clear_app_loggers()
+    assert rc_fail == 1
+    assert persistent_solar_calls == 4
+    failure_emails = [m for m in sent_emails if "Optimization cycle failed" in str(m["Subject"])]
+    assert len(failure_emails) == 1
+    assert "Open-Meteo request failed with HTTP 503" in failure_emails[0].get_content()

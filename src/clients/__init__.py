@@ -14,6 +14,7 @@ from src.clients.errors import (
     RateLimitError,
 )
 from src.clients.pstryk import PstrykClient
+from src.clients.retry import RetryPolicy
 from src.clients.solar import SolarForecastClient
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "PayloadParseError",
     "PstrykClient",
     "RateLimitError",
+    "RetryPolicy",
     "SolarForecastClient",
     "SolarmanV5Client",
 ]

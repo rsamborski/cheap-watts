@@ -39,6 +39,7 @@ Track progress across implementation phases. Update checkboxes as tasks are comp
 - [x] Implement SMTP email notifier (`src/notify/email.py`) triggered **whenever and only when Deye TOU schedule changes (including blocking hours for an actively charging EV or disabling grid-charge for sun) or a new EV recommendation occurs**.
 - [x] Enforce `[DRY-RUN]` subject/body prefix when running in `--dry-run` mode and cooldown deduplication via `state.py`.
 - [x] Wire full end-to-end pipeline in `src/main.py` with top-level error logging and optional failure alert email.
+- [x] Add exponential backoff retry mechanism (`src/clients/retry.py`, `API_MAX_RETRIES=3`, `API_RETRY_BACKOFF_SECONDS=2.0`) across external HTTP API clients (`Pstryk`, `Open-Meteo`, `BMW CarData`) so transient failures retry at least 3 times before sending failure notifications.
 
 ## Phase 5: Dry-Run Validation & Deployment Packaging
 - [x] Add `Dockerfile` and sample `crontab` configuration.

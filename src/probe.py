@@ -16,6 +16,7 @@ from src.clients.cardata import CarDataClient, CarDataTokenStore, CarDataVehicle
 from src.clients.deye import DeyeCloudClient, SolarmanV5Client
 from src.clients.errors import ApiClientError
 from src.clients.pstryk import PstrykClient
+from src.clients.retry import RetryPolicy
 from src.clients.solar import SolarArray, SolarForecastClient
 from src.config import Settings
 from src.models import PriceSlot
@@ -103,6 +104,7 @@ def probe_pstryk(
             base_url=settings.pstryk_base_url,
             tz_name=settings.timezone,
             transport=transport,
+            retry_policy=RetryPolicy.from_settings(settings),
         ) as client:
             slots = client.fetch_today_and_tomorrow(reference_time=reference_time)
     except (ApiClientError, Exception) as exc:
@@ -221,6 +223,7 @@ def probe_solar(
             tz_name=settings.timezone,
             transport=transport,
             extra_arrays=extra_arrays,
+            retry_policy=RetryPolicy.from_settings(settings),
         ) as client:
             forecast = client.fetch_forecast(forecast_days=2)
     except (ApiClientError, Exception) as exc:
@@ -387,6 +390,7 @@ def probe_cardata(
         home_latitude=settings.solar_latitude,
         home_longitude=settings.solar_longitude,
         home_radius_meters=settings.home_radius_meters,
+        retry_policy=RetryPolicy.from_settings(settings),
     ) as client:
         for vehicle in vehicles:
             if not vehicle.has_credentials(token_store):

@@ -21,6 +21,8 @@ def test_env_example_loads_cleanly_with_blank_values() -> None:
     assert settings.home_radius_meters == 200.0
     assert settings.max_missed_ev_renotifications == 3
     assert settings.dry_run is False
+    assert settings.api_max_retries == 3
+    assert settings.api_retry_backoff_seconds == 2.0
     assert "PSTRYK_API_KEY" in settings.missing_live_settings()
 
 

@@ -150,6 +150,8 @@ uv run cheap-watts postpone -v mini --clear
 | `HOME_RADIUS_METERS` | `200` | Max distance (m) from home coordinates to treat an EV as parked at home. |
 | `ALERT_COOLDOWN_HOURS` | `12` | Minimum hours before repeating an unchanged EV/error alert. |
 | `MAX_MISSED_EV_RENOTIFICATIONS` | `3` | Max missed-window EV re-notifications per low-SoC episode before cooldown applies. |
+| `API_MAX_RETRIES` | `3` | Retry count with exponential backoff for transient external HTTP API errors (`Pstryk`, `Open-Meteo`, `BMW CarData`) before failing. |
+| `API_RETRY_BACKOFF_SECONDS` | `2.0` | Initial exponential backoff delay in seconds (`2s -> 4s -> 8s` by default). |
 | `DRY_RUN` | `false` | Set `true` (or pass `--dry-run`) to skip all Deye writes globally. |
 
 ---
